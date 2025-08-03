@@ -1,0 +1,12 @@
+.vscode
+__pycache__
+checkpoints
+log
+*.pth
+*.onnx
+*.pt
+*.log
+*.csv
+.ipynb_checkpoints
+flagged
+pretrained_models
