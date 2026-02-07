@@ -19,10 +19,8 @@ import torchvision.transforms as transforms
 class config:
     network = 'laion/CLIP-ViT-B-16-laion2B-s34B-b88K'
 
-    model = HuggingFaceOpenClipModel(
-        hf_model_name=network,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        use_gradient_checkpoint=True)
+    model = HuggingFaceOpenClipModel(hf_model_name=network,
+                                     use_gradient_checkpoint=True)
 
     # load pretrained model or not
     trained_model_path = ''
@@ -77,6 +75,9 @@ class config:
     epochs = 100
     print_interval = 100
     save_interval = 5
+
+    use_step_save_interval = False
+    step_save_interval = 10000
 
     # torch.float16 or torch.bfloat16
     amp_type = torch.bfloat16

@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch.cuda.amp import autocast
+from torch.amp.autocast_mode import autocast
 
 from SimpleClip.common import AverageMeter, AccMeter
 
@@ -45,6 +45,9 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
     else:
         total_rank = 0
 
+    log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
+    logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
+
     iters = len(train_loader.dataset) // config.batch_size
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
@@ -68,7 +71,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
 
         if config.accumulation_steps == 1:
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     if config.use_siglip_loss:
                         outputs = model(images, tokens)
                         image_features = outputs['image_features']
@@ -113,7 +116,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(images, tokens)
                         else:
@@ -155,7 +158,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                 images = accumulation_images[accumulation_idx]
                 tokens = accumulation_texts[accumulation_idx]
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(images, tokens)
                             logit_scale = outputs['logit_scale']
@@ -303,7 +306,10 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            model.module.logit_scale.clamp_(0, math.log(100))
+            if config.use_compile:
+                model._orig_mod.module.logit_scale.clamp_(0, math.log(100))
+            else:
+                model.module.logit_scale.clamp_(0, math.log(100))
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
@@ -332,6 +338,22 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
+        total_accumulation_iters = accumulation_iters * (
+            epoch - 1) + accumulation_iter_index
+        if hasattr(config,
+                   'use_step_save_interval') and config.use_step_save_interval:
+            if total_accumulation_iters % config.step_save_interval == 0:
+                if local_rank == 0 and total_rank == 0:
+                    if config.use_compile:
+                        save_model = model._orig_mod.module.state_dict()
+                    else:
+                        save_model = model.module.state_dict()
+
+                    torch.save(
+                        save_model,
+                        os.path.join(config.checkpoint_dir,
+                                     f'step_{total_accumulation_iters}.pth'))
+
         iter_index += 1
 
     avg_loss = losses.avg
@@ -357,6 +379,9 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
     else:
         total_rank = 0
 
+    log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
+    logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
+
     iters = len(train_loader.dataset) // config.batch_size
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
@@ -380,7 +405,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
 
         if config.accumulation_steps == 1:
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     if config.use_siglip_loss:
                         outputs = model(images, tokens)
                         image_features = outputs['image_features']
@@ -425,7 +450,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(images, tokens)
                         else:
@@ -467,7 +492,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
                 images = accumulation_images[accumulation_idx]
                 tokens = accumulation_texts[accumulation_idx]
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(images, tokens)
                             logit_scale = outputs['logit_scale']
@@ -644,6 +669,22 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
+        total_accumulation_iters = accumulation_iters * (
+            epoch - 1) + accumulation_iter_index
+        if hasattr(config,
+                   'use_step_save_interval') and config.use_step_save_interval:
+            if total_accumulation_iters % config.step_save_interval == 0:
+                if local_rank == 0 and total_rank == 0:
+                    if config.use_compile:
+                        save_model = model._orig_mod.module.state_dict()
+                    else:
+                        save_model = model.module.state_dict()
+
+                    torch.save(
+                        save_model,
+                        os.path.join(config.checkpoint_dir,
+                                     f'step_{total_accumulation_iters}.pth'))
+
         iter_index += 1
 
     avg_loss = losses.avg
@@ -668,6 +709,9 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
     else:
         total_rank = 0
 
+    log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
+    logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
+
     iters = len(train_loader.dataset) // config.batch_size
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
@@ -685,7 +729,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
 
         if config.accumulation_steps == 1:
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     if config.use_siglip_loss:
                         outputs = model(inputs)
                         image_features = outputs['image_features']
@@ -730,7 +774,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(inputs)
                         else:
@@ -769,7 +813,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             for accumulation_idx in range(config.accumulation_steps):
                 inputs = accumulation_inputs[accumulation_idx]
                 if config.use_amp:
-                    with autocast(dtype=config.amp_type):
+                    with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
                             outputs = model(inputs)
                             logit_scale = outputs['logit_scale']
@@ -945,6 +989,22 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
+        total_accumulation_iters = accumulation_iters * (
+            epoch - 1) + accumulation_iter_index
+        if hasattr(config,
+                   'use_step_save_interval') and config.use_step_save_interval:
+            if total_accumulation_iters % config.step_save_interval == 0:
+                if local_rank == 0 and total_rank == 0:
+                    if config.use_compile:
+                        save_model = model._orig_mod.module.state_dict()
+                    else:
+                        save_model = model.module.state_dict()
+
+                    torch.save(
+                        save_model,
+                        os.path.join(config.checkpoint_dir,
+                                     f'step_{total_accumulation_iters}.pth'))
+
         iter_index += 1
 
     avg_loss = losses.avg
@@ -984,7 +1044,7 @@ def test_huggingface_open_clip_model(test_loader, model, config):
             batch_tokens = all_tokens[start_idx:end_idx]
 
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     batch_features = model.module.encode_text(batch_tokens)
             else:
                 batch_features = model.module.encode_text(batch_tokens)
@@ -1008,7 +1068,7 @@ def test_huggingface_open_clip_model(test_loader, model, config):
             labels = torch.tensor(labels).long().cuda()
 
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     if config.is_siglip_model:
                         image_features = model.module.encode_image(images)
                         image_features = F.normalize(image_features, dim=-1)
@@ -1127,7 +1187,7 @@ def test_huggingface_clip_model(test_loader, model, config):
             }
 
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     batch_features = model.module.model.get_text_features(
                         **batch_text_inputs)
             else:
@@ -1153,7 +1213,7 @@ def test_huggingface_clip_model(test_loader, model, config):
             pixel_values = inputs['pixel_values'].cuda()
 
             if config.use_amp:
-                with autocast(dtype=config.amp_type):
+                with autocast(device_type="cuda", dtype=config.amp_type):
                     image_features = model.module.model.get_image_features(
                         pixel_values=pixel_values)
             else:

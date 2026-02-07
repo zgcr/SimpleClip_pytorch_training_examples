@@ -19,12 +19,10 @@ import torchvision.transforms as transforms
 class config:
     network = 'google/siglip2-base-patch16-224'
 
-    model = HuggingFaceClipModel(
-        hf_model_name=network,
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=True)
+    model = HuggingFaceClipModel(hf_model_name=network,
+                                 pretrained=True,
+                                 local_files_only=False,
+                                 use_gradient_checkpoint=True)
 
     # load pretrained model or not
     trained_model_path = ''
@@ -75,6 +73,9 @@ class config:
     epochs = 100
     print_interval = 100
     save_interval = 10
+
+    use_step_save_interval = False
+    step_save_interval = 10000
 
     # torch.float16 or torch.bfloat16
     amp_type = torch.bfloat16

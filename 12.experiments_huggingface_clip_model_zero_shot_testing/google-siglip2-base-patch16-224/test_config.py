@@ -19,12 +19,11 @@ import torchvision.transforms as transforms
 class config:
     network = 'google/siglip2-base-patch16-224'
 
-    model = HuggingFaceClipModel(
-        hf_model_name=network,
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=False)
+    model = HuggingFaceClipModel(hf_model_name=network,
+                                 pretrained=True,
+                                 cache_dir='/root/autodl-tmp/cache/hub',
+                                 local_files_only=True,
+                                 use_gradient_checkpoint=False)
 
     is_siglip_model = True
 

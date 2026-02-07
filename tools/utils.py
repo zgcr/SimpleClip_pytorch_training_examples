@@ -16,13 +16,13 @@ import os
 import random
 import time
 
-from thop import profile
-from thop import clever_format
+from calflops import calculate_flops
+
 import torch
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 
-from torch.cuda.amp import GradScaler
+from torch.amp.grad_scaler import GradScaler
 
 
 def parse_args_example():
@@ -70,6 +70,7 @@ def get_logger(name, log_dir):
 
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
+    logger.propagate = False
     formatter = logging.Formatter('%(asctime)s - %(message)s',
                                   datefmt='%Y-%m-%d %H:%M:%S')
 
@@ -127,10 +128,16 @@ def compute_macs_and_params(config, model):
 
     model = model.cpu()
 
-    macs, params = profile(model, inputs=(macs_input, ), verbose=False)
-    macs, params = clever_format([macs, params], '%.3f')
+    flops, macs, params = calculate_flops(model=model,
+                                          args=[
+                                              macs_input,
+                                          ],
+                                          output_as_string=True,
+                                          output_precision=3,
+                                          print_results=False,
+                                          print_detailed=False)
 
-    return macs, params
+    return flops, macs, params
 
 
 class EmaModel(nn.Module):
@@ -168,16 +175,24 @@ def build_training_mode(config, model):
     if config.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model).cuda()
 
+    if hasattr(config, 'find_unused_parameters'):
+        find_unused_parameters = config.find_unused_parameters
+    else:
+        find_unused_parameters = False
+
     local_rank = config.local_rank
     if hasattr(config, 'use_ema_model') and config.use_ema_model:
         ema_model = EmaModel(model, decay=config.ema_model_decay)
         ema_model.ema_model = nn.parallel.DistributedDataParallel(
             ema_model.ema_model,
             device_ids=[local_rank],
-            output_device=local_rank)
-    model = nn.parallel.DistributedDataParallel(model,
-                                                device_ids=[local_rank],
-                                                output_device=local_rank)
+            output_device=local_rank,
+            find_unused_parameters=find_unused_parameters)
+    model = nn.parallel.DistributedDataParallel(
+        model,
+        device_ids=[local_rank],
+        output_device=local_rank,
+        find_unused_parameters=find_unused_parameters)
 
     if hasattr(config, 'use_amp') and config.use_amp:
         scaler = GradScaler()

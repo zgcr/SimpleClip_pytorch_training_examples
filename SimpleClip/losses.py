@@ -3,6 +3,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+# 1. compute_local_loss=True + gather_features_with_grad=True 所有特征有梯度
+# 2. compute_local_loss=False + gather_features_with_grad=False 仅当前GPU特征有梯度
+# 3. compute_local_loss=True + gather_features_with_grad=False 不允许这么用,text_features无梯度!
 class ClipLoss(nn.Module):
     '''
     Learning Transferable Visual Models From Natural Language Supervision: https://arxiv.org/abs/2103.00020

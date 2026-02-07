@@ -12,21 +12,37 @@
 
 # Introduction
 
-**This repository provides simple training and testing examples for clip model.**
+**This repository provides pytorch training examples for clip model.**
+
+# Training GPU server
 
 # Environments
 
-**1、This repository only supports running on ubuntu(verison>=22.04 LTS).**
+**1、Python and Pytorch Supported Version: Python>=3.12, Pytorch>=2.5.1.**
+
+**2、(optional)Add HF_HOME dir HF_ENDPOINT dir in .bashrc and .zshrc:**
+```
+# Add HF_HOME dir and HF_ENDPOINT dir in .bashrc and .zshrc files:
+export HF_HOME=/root/autodl-tmp/cache
+export HF_ENDPOINT=https://hf-mirror.com
+```
+```
+source .bashrc
+source .zshrc
+```
 
 **2、Create a conda environment:**
 ```
-conda create -n simpleClip python=3.12
+conda create -n SimpleClip python=3.12
 ```
 
-**3、Using commands to install PyTorch:**
+**3、Install PyTorch:**
 ```
-conda install pytorch==2.3.0 torchvision==0.18.0 torchaudio==2.3.0 pytorch-cuda=12.1 -c pytorch -c nvidia
+conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
 ```
+To install a different PyTorch version, find command from here:
+
+https://pytorch.org/get-started/previous-versions/
 
 **4、Install other Packages:**
 ```
@@ -54,8 +70,8 @@ https://github.com/mlfoundations/open_clip
 If you find my work useful in your research, please consider citing:
 ```
 @inproceedings{zgcr,
- title={SimpleClip-pytorch-training-examples},
+ title={SimpleAICV-pytorch-training-examples},
  author={zgcr},
- year={2025-2030}
+ year={2020-2030}
 }
 ```

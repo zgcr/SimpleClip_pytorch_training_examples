@@ -112,7 +112,7 @@ if __name__ == '__main__':
     import torchvision.transforms as transforms
     from torchvision.transforms.functional import InterpolationMode
 
-    from SimpleClip.common import Opencv2PIL, PIL2Opencv, TorchRandomResizedCrop, TorchRandomHorizontalFlip, TorchResize, TorchCenterCrop, ImageCaptionPairCollater
+    from SimpleClip.common import Opencv2PIL, PIL2Opencv, TorchRandomResizedCrop, TorchResize, TorchCenterCrop, ImageCaptionPairCollater
 
     ilsvrc2012traindataset = CC3MDataset(
         root_dir=image_caption_pair_dataset_path,

@@ -4,6 +4,7 @@ import gzip
 import html
 
 import numpy as np
+import nltk
 import random
 import string
 import tempfile
@@ -184,7 +185,6 @@ def syntax_mask_tokenize(texts, context_length, sot_token_id, eot_token_id,
     """ Returns the tokenized representation of given input string(s).
     Apply syntax masking before tokenize.
     """
-    import nltk
     global _nltk_init
     if not _nltk_init:
         # run them for the first time
@@ -376,7 +376,7 @@ class SimpleTokenizer:
 
         return text
 
-    def __call__(self, texts):
+    def __call__(self, texts, context_length=None):
         """ 
         Returns the tokenized representation of given input string(s)
 
@@ -392,24 +392,25 @@ class SimpleTokenizer:
         if isinstance(texts, str):
             texts = [texts]
 
+        context_length = context_length or self.context_length
+        assert context_length, 'Please set a valid context length'
+
         if self.reduction_fn is not None:
             # use reduction strategy for tokenize if set, otherwise default to truncation below
             return self.reduction_fn(texts,
-                                     context_length=self.context_length,
+                                     context_length=context_length,
                                      sot_token_id=self.sot_token_id,
                                      eot_token_id=self.eot_token_id,
                                      encode_fn=self.encode)
 
         all_tokens = [[self.sot_token_id] + self.encode(text) +
                       [self.eot_token_id] for text in texts]
-        result = torch.zeros(len(all_tokens),
-                             self.context_length,
-                             dtype=torch.long)
+        result = torch.zeros(len(all_tokens), context_length, dtype=torch.long)
 
         for i, tokens in enumerate(all_tokens):
-            if len(tokens) > self.context_length:
+            if len(tokens) > context_length:
                 # Truncate
-                tokens = tokens[:self.context_length]
+                tokens = tokens[:context_length]
                 tokens[-1] = self.eot_token_id
             result[i, :len(tokens)] = torch.tensor(tokens)
 
@@ -433,10 +434,10 @@ class SigLipTokenizer:
             "http://storage.googleapis.com/t5-data/vocabs/cc_en.32000/sentencepiece.model",
             # used in multilingual models (mT5, PaLI), vocab_size=250000
             "mc4":
-            "http://storage.googleapis.com/t5-data/vocabs/mc4.250000.100extra/sentencepiece.model",
+            "/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/mc4-sentencepiece.model",
             # used in SigLIP2 models, vocab_size=256000
             "gemma":
-            "http://storage.googleapis.com/big_vision/gemma_tokenizer.model",
+            "/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/gemma_tokenizer.model",
         }
 
         if 'gemma' in tokenizer_name:
@@ -462,16 +463,19 @@ class SigLipTokenizer:
 
         print(f'context_length: {self.context_length}')
 
-    def __call__(self, texts):
+    def __call__(self, texts, context_length=None):
         # same cleaning as for default tokenizer, except lowercasing
         # adding lower (for case-sensitive tokenizers) will make it more robust but less sensitive to nuance
         if isinstance(texts, str):
             texts = [texts]
 
+        context_length = context_length or self.context_length
+        assert context_length, 'Please set a valid context length'
+
         texts = [canonicalize_text(basic_clean(text)) for text in texts]
         output = self.tokenizer(texts,
                                 return_tensors='pt',
-                                max_length=self.context_length,
+                                max_length=context_length,
                                 padding='max_length',
                                 truncation=True)
         tokens = output.input_ids

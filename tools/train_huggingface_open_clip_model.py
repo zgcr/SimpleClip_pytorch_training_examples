@@ -39,6 +39,7 @@ def main():
     log_dir = os.path.join(args.work_dir, 'log')
     checkpoint_dir = os.path.join(args.work_dir, 'checkpoints')
     resume_model = os.path.join(checkpoint_dir, 'latest.pth')
+    config.checkpoint_dir = checkpoint_dir
     config.gpus_type = torch.cuda.get_device_name()
     config.gpus_num = torch.cuda.device_count()
 
@@ -46,29 +47,15 @@ def main():
 
     local_rank = int(os.environ['LOCAL_RANK'])
     config.local_rank = local_rank
-
     # start init process
-    torch.distributed.init_process_group(backend='nccl', init_method='env://')
     torch.cuda.set_device(local_rank)
-
-    # total_rank多机多卡判断
-    total_rank = torch.distributed.get_rank()
-    config.total_rank = total_rank
-
-    # 获取多机多卡训练时所有节点上的卡总数
-    per_node_process_nums = int(os.environ['LOCAL_WORLD_SIZE'])
-    per_node_gpus_num = torch.cuda.device_count()
-    per_node_per_process_gpus_num = int(per_node_gpus_num /
-                                        per_node_process_nums)
-
-    world_size = torch.distributed.get_world_size()
-    config.gpus_num = int(per_node_per_process_gpus_num * world_size)
+    torch.distributed.init_process_group(backend='nccl', init_method='env://')
     config.group = torch.distributed.new_group(list(range(config.gpus_num)))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)
 
-    torch.distributed.barrier()
+    torch.distributed.barrier(device_ids=[local_rank])
 
     logger = get_logger('train', log_dir)
 
@@ -139,7 +126,9 @@ def main():
     start_epoch, train_time = 1, 0
     best_loss, train_loss = 1e9, 0
     if os.path.exists(resume_model):
-        checkpoint = torch.load(resume_model, map_location=torch.device('cpu'))
+        checkpoint = torch.load(resume_model,
+                                map_location=torch.device('cpu'),
+                                weights_only=True)
         model.load_state_dict(checkpoint['model_state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
@@ -246,6 +235,8 @@ def main():
 
     log_info = f'train done. model: {config.network}, train time: {train_time:.3f} hours, best_loss: {best_loss:.4f}'
     logger.info(log_info) if local_rank == 0 else None
+
+    torch.distributed.destroy_process_group()
 
     return
 

@@ -134,12 +134,10 @@ if __name__ == '__main__':
     from SimpleClip.common import HuggingFaceClipModelZeroShortCollater
 
     from SimpleClip.huggingface_clip_models.huggingface_clip_model import HuggingFaceClipModel
-    net = HuggingFaceClipModel(
-        hf_model_name='openai/clip-vit-base-patch16',
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=False)
+    net = HuggingFaceClipModel(hf_model_name='openai/clip-vit-base-patch16',
+                               pretrained=True,
+                               local_files_only=False,
+                               use_gradient_checkpoint=False)
     val_processor = net.processor
 
     ilsvrc2012traindataset = ILSVRC2012Dataset(

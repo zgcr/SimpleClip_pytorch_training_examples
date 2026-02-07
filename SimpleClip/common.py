@@ -3,8 +3,6 @@ import numpy as np
 
 from PIL import Image
 
-from safetensors.torch import load_file
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -65,24 +63,6 @@ class TorchRandomResizedCrop:
         image, caption = sample['image'], sample['caption']
 
         image = self.RandomResizedCrop(image)
-
-        sample['image'], sample['caption'] = image, caption
-
-        return sample
-
-
-class TorchRandomHorizontalFlip:
-
-    def __init__(self, prob=0.5):
-        self.RandomHorizontalFlip = transforms.RandomHorizontalFlip(prob)
-
-    def __call__(self, sample):
-        '''
-        sample must be a dict,contains 'image'、'caption' keys.
-        '''
-        image, caption = sample['image'], sample['caption']
-
-        image = self.RandomHorizontalFlip(image)
 
         sample['image'], sample['caption'] = image, caption
 
@@ -345,7 +325,8 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
         return
 
     saved_state_dict = torch.load(saved_model_path,
-                                  map_location=torch.device('cpu'))
+                                  map_location=torch.device('cpu'),
+                                  weights_only=True)
 
     not_loaded_save_state_dict = []
     filtered_state_dict = {}

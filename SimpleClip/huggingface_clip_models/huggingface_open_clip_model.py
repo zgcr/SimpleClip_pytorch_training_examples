@@ -14,8 +14,6 @@ from open_clip import create_model_and_transforms, get_tokenizer
 
 # no weight decay layer:'positional_embedding', 'class_embedding', 'logit_scale', 'logit_bias'
 
-# torch==2.3.0, transformers==4.50.0, timm==1.0.15
-
 # hf国内代理
 # https://hf-mirror.com/
 # export HF_ENDPOINT=https://hf-mirror.com
@@ -169,15 +167,11 @@ if __name__ == '__main__':
 
     from PIL import Image
 
-    # https://hf-mirror.com/
-    # export HF_ENDPOINT=https://hf-mirror.com
-
     ###############################################################################
     # laion/CLIP-ViT-B-16-laion2B-s34B-b88K
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
+    # cache_dir: HF_HOME dir +/hub
     net = HuggingFaceOpenClipModel(
         hf_model_name='laion/CLIP-ViT-B-16-laion2B-s34B-b88K',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
         use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()
@@ -188,7 +182,7 @@ if __name__ == '__main__':
         Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
     text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
 
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad():
         image_features = net.encode_image(image)
         text_features = net.encode_text(text)
 
@@ -204,10 +198,9 @@ if __name__ == '__main__':
 
     ###############################################################################
     # timm/vit_base_patch16_clip_224.openai
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
+    # cache_dir: HF_HOME dir +/hub
     net = HuggingFaceOpenClipModel(
         hf_model_name='timm/vit_base_patch16_clip_224.openai',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
         use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()
@@ -218,7 +211,7 @@ if __name__ == '__main__':
         Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
     text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
 
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad():
         image_features = net.encode_image(image)
         text_features = net.encode_text(text)
 
@@ -234,11 +227,9 @@ if __name__ == '__main__':
 
     ###############################################################################
     # apple/DFN2B-CLIP-ViT-B-16
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceOpenClipModel(
-        hf_model_name='apple/DFN2B-CLIP-ViT-B-16',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceOpenClipModel(hf_model_name='apple/DFN2B-CLIP-ViT-B-16',
+                                   use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()
     processor = net.val_preprocess
@@ -248,7 +239,7 @@ if __name__ == '__main__':
         Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
     text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
 
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad():
         image_features = net.encode_image(image)
         text_features = net.encode_text(text)
 
@@ -264,11 +255,9 @@ if __name__ == '__main__':
 
     ###############################################################################
     # timm/ViT-B-16-SigLIP
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceOpenClipModel(
-        hf_model_name='timm/ViT-B-16-SigLIP',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceOpenClipModel(hf_model_name='timm/ViT-B-16-SigLIP',
+                                   use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()
     processor = net.val_preprocess
@@ -278,7 +267,7 @@ if __name__ == '__main__':
         Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
     text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
 
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad():
         image_features = net.encode_image(image)
         text_features = net.encode_text(text)
 
@@ -295,11 +284,9 @@ if __name__ == '__main__':
 
     ###############################################################################
     # timm/ViT-B-16-SigLIP2
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceOpenClipModel(
-        hf_model_name='timm/ViT-B-16-SigLIP2',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceOpenClipModel(hf_model_name='timm/ViT-B-16-SigLIP2',
+                                   use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()
     processor = net.val_preprocess
@@ -309,7 +296,7 @@ if __name__ == '__main__':
         Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
     text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
 
-    with torch.no_grad(), torch.cuda.amp.autocast():
+    with torch.no_grad():
         image_features = net.encode_image(image)
         text_features = net.encode_text(text)
 
@@ -321,5 +308,36 @@ if __name__ == '__main__':
 
         probs = torch.sigmoid(image_features @ text_features.T * logit_scale +
                               logit_bias)
+
+    print(f'probs: {probs}')
+
+    ###############################################################################
+    # local_files_only = True
+    # laion/CLIP-ViT-B-16-laion2B-s34B-b88K
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceOpenClipModel(
+        hf_model_name='laion/CLIP-ViT-B-16-laion2B-s34B-b88K',
+        cache_dir='/root/autodl-tmp/cache/hub',
+        use_gradient_checkpoint=False)
+    net = net.cuda()
+    net.eval()
+    processor = net.val_preprocess
+    tokenizer = net.tokenizer
+
+    image = processor(
+        Image.open('./beignets-task-guide.png')).unsqueeze(0).cuda()
+    text = tokenizer(['a dog', 'a cat', 'a donut', 'a beignet']).cuda()
+
+    with torch.no_grad():
+        image_features = net.encode_image(image)
+        text_features = net.encode_text(text)
+
+        image_features = F.normalize(image_features, dim=-1)
+        text_features = F.normalize(text_features, dim=-1)
+
+        logit_scale = net.model.logit_scale.exp()
+
+        probs = (logit_scale *
+                 image_features @ text_features.T).softmax(dim=-1)
 
     print(f'probs: {probs}')

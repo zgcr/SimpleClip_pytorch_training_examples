@@ -19,10 +19,9 @@ import torchvision.transforms as transforms
 class config:
     network = 'laion/CLIP-ViT-B-16-laion2B-s34B-b88K'
 
-    model = HuggingFaceOpenClipModel(
-        hf_model_name=network,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        use_gradient_checkpoint=False)
+    model = HuggingFaceOpenClipModel(hf_model_name=network,
+                                     cache_dir='/root/autodl-tmp/cache/hub',
+                                     use_gradient_checkpoint=False)
 
     is_siglip_model = False
 

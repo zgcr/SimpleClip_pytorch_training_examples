@@ -6,8 +6,6 @@ from transformers import AutoModel, AutoProcessor, AutoConfig
 
 # no weight decay layer:'positional_embedding', 'class_embedding', 'logit_scale', 'logit_bias'
 
-# torch==2.3.0, transformers==4.50.0
-
 # hf国内代理
 # https://hf-mirror.com/
 # export HF_ENDPOINT=https://hf-mirror.com
@@ -76,7 +74,8 @@ class HuggingFaceClipModel(nn.Module):
         self.processor = AutoProcessor.from_pretrained(
             hf_model_name,
             cache_dir=cache_dir,
-            local_files_only=local_files_only)
+            local_files_only=local_files_only,
+            use_fast=False)
 
         if pretrained:
             self.model = AutoModel.from_pretrained(
@@ -161,18 +160,13 @@ if __name__ == '__main__':
 
     from PIL import Image
 
-    # https://hf-mirror.com/
-    # export HF_ENDPOINT=https://hf-mirror.com
-
     ###############################################################################
     # openai/clip-vit-base-patch16
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceClipModel(
-        hf_model_name='openai/clip-vit-base-patch16',
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceClipModel(hf_model_name='openai/clip-vit-base-patch16',
+                               pretrained=True,
+                               local_files_only=False,
+                               use_gradient_checkpoint=False)
     model = net.model
     processor = net.processor
     model = model.cuda()
@@ -214,13 +208,11 @@ if __name__ == '__main__':
 
     ###############################################################################
     # google/siglip-base-patch16-224
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceClipModel(
-        hf_model_name='google/siglip-base-patch16-224',
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceClipModel(hf_model_name='google/siglip-base-patch16-224',
+                               pretrained=True,
+                               local_files_only=False,
+                               use_gradient_checkpoint=False)
     model = net.model
     processor = net.processor
     model = model.cuda()
@@ -263,13 +255,11 @@ if __name__ == '__main__':
 
     ###############################################################################
     # google/siglip2-base-patch16-224
-    # cache_dir: /root/autodl-tmp/huggingface_clip_pretrained_model
-    net = HuggingFaceClipModel(
-        hf_model_name='google/siglip2-base-patch16-224',
-        pretrained=True,
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
-        local_files_only=False,
-        use_gradient_checkpoint=False)
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceClipModel(hf_model_name='google/siglip2-base-patch16-224',
+                               pretrained=True,
+                               local_files_only=False,
+                               use_gradient_checkpoint=False)
     model = net.model
     processor = net.processor
     model = model.cuda()
@@ -307,5 +297,53 @@ if __name__ == '__main__':
 
         probs = torch.sigmoid(image_features @ text_features.T * logit_scale +
                               logit_bias)
+
+    print(f'Text Probs with self forward inference: {probs}')
+
+    ###############################################################################
+    # local_files_only = True
+    # openai/clip-vit-base-patch16
+    # cache_dir: HF_HOME dir +/hub
+    net = HuggingFaceClipModel(hf_model_name='openai/clip-vit-base-patch16',
+                               pretrained=True,
+                               cache_dir='/root/autodl-tmp/cache/hub',
+                               local_files_only=True,
+                               use_gradient_checkpoint=False)
+    model = net.model
+    processor = net.processor
+    model = model.cuda()
+    model.eval()
+
+    image = Image.open('./000000039769.jpg')
+    text = ["a photo of a cat", "a photo of a dog"]
+    inputs = processor(images=image,
+                       text=text,
+                       return_tensors='pt',
+                       padding="max_length",
+                       max_length=77)
+    inputs = {k: v.cuda() for k, v in inputs.items()}
+
+    print(f'process inputs keys: {inputs.keys()}')
+    for key, value in inputs.items():
+        print(key, inputs[key].shape)
+
+    # official inference
+    with torch.no_grad():
+        outputs = model(**inputs)
+        print(f'outputs keys: {outputs.keys()}')
+        probs = outputs.logits_per_image.softmax(dim=1)
+
+    print(f'Text Probs with offical inference: {probs}')
+
+    # self forward inference
+    with torch.no_grad():
+        outputs = net(inputs)
+        print(f'outputs keys: {outputs.keys()}')
+        image_features = outputs['image_features']
+        text_features = outputs['text_features']
+        logit_scale = outputs['logit_scale']
+
+        probs = (logit_scale *
+                 image_features @ text_features.t()).softmax(dim=-1)
 
     print(f'Text Probs with self forward inference: {probs}')

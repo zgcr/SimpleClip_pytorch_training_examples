@@ -141,7 +141,6 @@ if __name__ == '__main__':
     from SimpleClip.huggingface_clip_models.huggingface_open_clip_model import HuggingFaceOpenClipModel
     net = HuggingFaceOpenClipModel(
         hf_model_name='laion/CLIP-ViT-B-16-laion2B-s34B-b88K',
-        cache_dir='/root/autodl-tmp/huggingface_clip_pretrained_model',
         use_gradient_checkpoint=False)
     val_processor = net.train_preprocess
 
