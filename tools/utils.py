@@ -24,6 +24,8 @@ import torch.backends.cudnn as cudnn
 
 from torch.amp.grad_scaler import GradScaler
 
+from tools.muon_optimizer import Muon
+
 
 def parse_args_example():
     '''
@@ -290,13 +292,14 @@ class Scheduler:
 def build_optimizer(config, model):
     optimizer_name = config.optimizer[0]
     optimizer_parameters = config.optimizer[1]
-    assert optimizer_name in ['SGD', 'AdamW'], 'Unsupported optimizer!'
+    assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
 
     lr = optimizer_parameters['lr']
     weight_decay = optimizer_parameters['weight_decay']
 
     # if global_weight_decay = False,set 1d parms weight decay = 0.
-    global_weight_decay = optimizer_parameters['global_weight_decay']
+    global_weight_decay = True if 'global_weight_decay' not in optimizer_parameters.keys(
+    ) else optimizer_parameters['global_weight_decay']
 
     # if global_weight_decay = True,no_weight_decay_layer_name_list can't be set.
     no_weight_decay_layer_name_list = []
@@ -595,3 +598,82 @@ def build_optimizer(config, model):
                                  lr=lr,
                                  betas=(beta1, beta2),
                                  eps=eps), model_layer_weight_decay_list
+    elif optimizer_name == 'Muon':
+        # Note: Muon uses unified lr and wd for all parameters.
+        # Per-layer lr/wd settings from optimizer_parameters are not applied.
+        # Muon optimizer don't support global_weight_decay
+        # Muon optimizer don't support no_weight_decay_layer_name_list
+        # Muon optimizer don't support sub_layer_lr/sub_layer_weight_decay
+        # Muon optimizer don't support lr_layer_decay
+
+        exclude_muon_layer_name_list = [
+            'position_encoding',
+            'cls_token',
+            'patch_embedding',
+        ]
+        if 'exclude_muon_layer_name_list' in optimizer_parameters.keys(
+        ) and isinstance(optimizer_parameters['exclude_muon_layer_name_list'],
+                         list):
+            exclude_muon_layer_name_list = exclude_muon_layer_name_list + optimizer_parameters[
+                'exclude_muon_layer_name_list']
+
+        # Separate parameters into muon_params and adamw_params
+        muon_param_list, muon_param_names = [], []
+        adamw_param_list, adamw_param_names = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # Muon is used for 2D parameters that are not in exclude list
+            use_muon = (
+                param.ndim >= 2
+                and not any(exclude_name in name
+                            for exclude_name in exclude_muon_layer_name_list))
+
+            if use_muon:
+                muon_param_list.append(param)
+                muon_param_names.append(name)
+            else:
+                adamw_param_list.append(param)
+                adamw_param_names.append(name)
+
+        # Create summary for model_layer_weight_decay_list
+        model_layer_weight_decay_list = []
+        if len(muon_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': muon_param_names,
+                'optimizer': 'Muon',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+        if len(adamw_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': adamw_param_names,
+                'optimizer': 'AdamW',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+
+        momentum = 0.95 if 'momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['momentum']
+        nesterov = True if 'nesterov' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['nesterov']
+        ns_steps = 5 if 'ns_steps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['ns_steps']
+
+        adamw_beta1 = 0.9 if 'adamw_beta1' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_beta1']
+        adamw_beta2 = 0.999 if 'adamw_beta2' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_beta2']
+        adamw_eps = 1e-08 if 'adamw_eps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_eps']
+
+        return Muon(lr=lr,
+                    wd=weight_decay,
+                    muon_params=muon_param_list,
+                    adamw_params=adamw_param_list,
+                    momentum=momentum,
+                    nesterov=nesterov,
+                    ns_steps=ns_steps,
+                    adamw_betas=(adamw_beta1, adamw_beta2),
+                    adamw_eps=adamw_eps), model_layer_weight_decay_list

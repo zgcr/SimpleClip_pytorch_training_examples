@@ -31,12 +31,12 @@ source .bashrc
 source .zshrc
 ```
 
-**2、Create a conda environment:**
+**3、Create a conda environment:**
 ```
 conda create -n SimpleClip python=3.12
 ```
 
-**3、Install PyTorch:**
+**4、Install PyTorch:**
 ```
 conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
 ```
@@ -44,7 +44,7 @@ To install a different PyTorch version, find command from here:
 
 https://pytorch.org/get-started/previous-versions/
 
-**4、Install other Packages:**
+**5、Install other Packages:**
 ```
 pip install -r requirements.txt
 ```
