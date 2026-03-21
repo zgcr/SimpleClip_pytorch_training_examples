@@ -7,9 +7,9 @@ sys.path.append(BASE_DIR)
 
 from tools.path import image_caption_pair_dataset_path
 
-from SimpleClip.models import gqa_clip
-from SimpleClip.models.tokenizer import SigLipTokenizer
-from SimpleClip.losses import SigLipLoss
+from SimpleClip.models import clip
+from SimpleClip.models.tokenizer import SimpleTokenizer
+from SimpleClip.losses import ClipLoss
 from SimpleClip.datasets.cc3m_dataset import CC3MDataset
 from SimpleClip.common import Opencv2PIL, TorchRandomResizedCrop, TorchMeanStdNormalize, ImageCaptionPairCollater, load_state_dict
 
@@ -19,9 +19,9 @@ from torchvision.transforms.functional import InterpolationMode
 
 
 class config:
-    network = 'vit_base_patch16_gqa_siglip'
+    network = 'vit_base_patch16_clip'
 
-    model = gqa_clip.__dict__[network](**{
+    model = clip.__dict__[network](**{
         'use_gradient_checkpoint': True,
     })
 
@@ -31,10 +31,12 @@ class config:
     trained_model_path = ''
     load_state_dict(trained_model_path, model)
 
-    tokenizer = SigLipTokenizer('gemma', context_length=model.context_length)
+    tokenizer = SimpleTokenizer(context_length=model.context_length)
 
-    use_siglip_loss = True
-    train_criterion = SigLipLoss(dist_type='bidir')
+    use_siglip_loss = False
+    train_criterion = ClipLoss(cache_labels=True,
+                               compute_local_loss=True,
+                               gather_features_with_grad=True)
 
     train_dataset = CC3MDataset(
         root_dir=image_caption_pair_dataset_path,
@@ -100,3 +102,8 @@ class config:
         # 'max-autotune': optimizes to produce the fastest model, but takes a very long time to compile and may failed.
         'mode': 'default',
     }
+
+    # ZeRO stage: 0 (equivalent to DDP), 1, 2, 3
+    deepspeed_zero_stage = 0
+    # ZeRO-Offload: offload optimizer states (and params for stage 3) to CPU
+    deepspeed_offload = False

@@ -50,6 +50,11 @@ def main():
     # start init process
     torch.cuda.set_device(local_rank)
     torch.distributed.init_process_group(backend='nccl', init_method='env://')
+
+    # 获取total_rank
+    total_rank = torch.distributed.get_rank()
+    config.total_rank = total_rank
+
     config.group = torch.distributed.new_group(list(range(config.gpus_num)))
 
     os.makedirs(checkpoint_dir, exist_ok=True)

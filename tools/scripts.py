@@ -10,6 +10,8 @@ import math
 
 from tqdm import tqdm
 
+import deepspeed
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -249,11 +251,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                         loss_value = criterion(image_features, text_features,
                                                logit_scale, config)
 
-                # 各loss数量级除以accumulation_steps
-                for key, value in loss_value.items():
-                    loss_value[key] = value / config.accumulation_steps
-
-                # 总loss是各loss的累加,因此其数量级也已经除以accumulation_steps
+                # CLIP对比学习中每次backward只对当前batch的live features回传梯度，K次backward的梯度之和恰好等于完整的全batch梯度，无需再做accumulation_steps平均
                 loss = 0.
                 for key, value in loss_value.items():
                     loss += value
@@ -332,9 +330,9 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                 iters // config.accumulation_steps)
         if iter_index % int(
                 config.print_interval * config.accumulation_steps) == 0:
-            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss*config.accumulation_steps:.4f}, '
+            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss:.4f}, '
             for key, value in loss_value.items():
-                log_info += f'{key}: {value*config.accumulation_steps:.4f}, '
+                log_info += f'{key}: {value:.4f}, '
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
@@ -357,7 +355,253 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
         iter_index += 1
 
     avg_loss = losses.avg
-    avg_loss = avg_loss * config.accumulation_steps
+
+    return avg_loss
+
+
+def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
+                               scheduler, epoch, logger, config):
+    '''
+    train clip model for one epoch
+    model: DeepSpeed engine (handles fp16/bf16 natively)
+    optimizer: DeepSpeed-wrapped optimizer
+    '''
+    losses = AverageMeter()
+
+    # switch to train mode
+    model.train()
+
+    local_rank = config.local_rank
+    if hasattr(config, 'total_rank'):
+        total_rank = config.total_rank
+    else:
+        total_rank = 0
+
+    log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
+    logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
+
+    iters = len(train_loader.dataset) // config.batch_size
+    iter_index = 1
+    assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
+    assert config.accumulation_steps == model.gradient_accumulation_steps()
+
+    if config.accumulation_steps > 1:
+        accumulation_images = []
+        accumulation_texts = []
+        accumulation_features = {
+            'image_features': [],
+            'text_features': [],
+        }
+
+    for data_idx, data in enumerate(train_loader):
+        images = data['image']
+        images = images.cuda()
+
+        # captions必须是一个list, list中每个元素都是字符串
+        captions = data['caption']
+        tokens = config.tokenizer(captions)
+        tokens = tokens.long().cuda()
+
+        if config.accumulation_steps == 1:
+            if config.use_siglip_loss:
+                outputs = model(images, tokens)
+                image_features = outputs['image_features']
+                text_features = outputs['text_features']
+                logit_scale = outputs['logit_scale']
+                logit_bias = outputs['logit_bias']
+                loss_value = criterion(image_features, text_features,
+                                       logit_scale, logit_bias, config)
+            else:
+                outputs = model(images, tokens)
+                image_features = outputs['image_features']
+                text_features = outputs['text_features']
+                logit_scale = outputs['logit_scale']
+                loss_value = criterion(image_features, text_features,
+                                       logit_scale, config)
+
+            loss = 0.
+            for key, value in loss_value.items():
+                loss += value
+
+            # DeepSpeed backward (handles loss scaling for fp16 internally)
+            model.backward(loss)
+            # DeepSpeed step (handles gradient clipping + optimizer step)
+            model.step()
+        else:
+            # First, cache the features without any gradient tracking.
+            with torch.no_grad():
+                if config.use_siglip_loss:
+                    outputs = model(images, tokens)
+                else:
+                    outputs = model(images, tokens)
+                image_features = outputs['image_features']
+                text_features = outputs['text_features']
+
+                accumulation_features['image_features'].append(image_features)
+                accumulation_features['text_features'].append(text_features)
+
+                accumulation_images.append(images)
+                accumulation_texts.append(tokens)
+
+            # 只有data_idx循环到被config.accumulation_steps整除时才不会continue,继续往下执行
+            if (data_idx + 1) % config.accumulation_steps > 0:
+                # continue后,跳到下一个data_idx重新开始取数据
+                iter_index += 1
+                continue
+
+            assert len(accumulation_images) == len(
+                accumulation_texts) == config.accumulation_steps
+
+            assert len(accumulation_features['image_features']) == len(
+                accumulation_features['text_features']
+            ) == config.accumulation_steps
+
+            # Now, ready to take gradients for the last accum_freq batches.
+            # Re-do the forward pass for those batches, and use the cached
+            # features from the other batches as negatives.
+            for accumulation_idx in range(config.accumulation_steps):
+                images = accumulation_images[accumulation_idx]
+                tokens = accumulation_texts[accumulation_idx]
+
+                if config.use_siglip_loss:
+                    outputs = model(images, tokens)
+                    logit_scale = outputs['logit_scale']
+                    logit_bias = outputs['logit_bias']
+
+                    accumulation_image_features = accumulation_features[
+                        'image_features']
+                    accumulation_text_features = accumulation_features[
+                        'text_features']
+
+                    image_features = torch.cat(
+                        accumulation_image_features[0:accumulation_idx] +
+                        [outputs['image_features']] +
+                        accumulation_image_features[accumulation_idx + 1:])
+                    text_features = torch.cat(
+                        accumulation_text_features[0:accumulation_idx] +
+                        [outputs['text_features']] +
+                        accumulation_text_features[accumulation_idx + 1:])
+
+                    loss_value = criterion(image_features, text_features,
+                                           logit_scale, logit_bias, config)
+                else:
+                    outputs = model(images, tokens)
+                    logit_scale = outputs['logit_scale']
+
+                    accumulation_image_features = accumulation_features[
+                        'image_features']
+                    accumulation_text_features = accumulation_features[
+                        'text_features']
+
+                    image_features = torch.cat(
+                        accumulation_image_features[0:accumulation_idx] +
+                        [outputs['image_features']] +
+                        accumulation_image_features[accumulation_idx + 1:])
+                    text_features = torch.cat(
+                        accumulation_text_features[0:accumulation_idx] +
+                        [outputs['text_features']] +
+                        accumulation_text_features[accumulation_idx + 1:])
+
+                    loss_value = criterion(image_features, text_features,
+                                           logit_scale, config)
+
+                # gradient caching下每次backward得到的是完整loss对当前子批次参数的偏导,
+                # K次backward的梯度之和天然等于完整梯度,不需要再除以accumulation_steps。
+                loss = 0.
+                for key, value in loss_value.items():
+                    loss += value
+
+                # DeepSpeed backward + step for each micro-batch.
+                # DeepSpeed internally delays allreduce and optimizer step
+                # until the accumulation boundary (last micro-batch).
+                model.backward(loss)
+                model.step()
+
+        # reset accumulation buffers
+        if config.accumulation_steps > 1:
+            accumulation_images = []
+            accumulation_texts = []
+            accumulation_features = {
+                'image_features': [],
+                'text_features': [],
+            }
+
+        # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+        with torch.no_grad():
+            if config.use_compile:
+                logit_scale = model.module._orig_mod.logit_scale
+            else:
+                logit_scale = model.module.logit_scale
+
+            if hasattr(config, 'deepspeed_zero_stage'
+                       ) and config.deepspeed_zero_stage == 3:
+                with deepspeed.zero.GatheredParameters(logit_scale,
+                                                       modifier_rank=0):
+                    logit_scale.clamp_(0, math.log(100))
+            else:
+                logit_scale.clamp_(0, math.log(100))
+
+        for key, value in loss_value.items():
+            [value] = all_reduce_operation_in_group_for_variables(
+                variables=[value],
+                operator=torch.distributed.ReduceOp.SUM,
+                group=config.group)
+            loss_value[key] = value / float(config.gpus_num)
+
+        [loss] = all_reduce_operation_in_group_for_variables(
+            variables=[loss],
+            operator=torch.distributed.ReduceOp.SUM,
+            group=config.group)
+        loss = loss / float(config.gpus_num)
+        losses.update(loss, images.size(0))
+
+        scheduler.step(optimizer, iter_index / iters + (epoch - 1))
+
+        accumulation_iter_index, accumulation_iters = int(
+            iter_index // config.accumulation_steps), int(
+                iters // config.accumulation_steps)
+        if iter_index % int(
+                config.print_interval * config.accumulation_steps) == 0:
+            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss:.4f}, '
+            for key, value in loss_value.items():
+                log_info += f'{key}: {value:.4f}, '
+            logger.info(
+                log_info) if local_rank == 0 and total_rank == 0 else None
+
+        total_accumulation_iters = accumulation_iters * (
+            epoch - 1) + accumulation_iter_index
+        if hasattr(config,
+                   'use_step_save_interval') and config.use_step_save_interval:
+            if total_accumulation_iters % config.step_save_interval == 0:
+                if config.use_compile:
+                    module = model.module._orig_mod
+                else:
+                    module = model.module
+
+                save_path = os.path.join(
+                    config.checkpoint_dir,
+                    f'step_{total_accumulation_iters}.pth')
+
+                if hasattr(config, 'deepspeed_zero_stage'
+                           ) and config.deepspeed_zero_stage == 3:
+                    state_dict = {}
+                    for name, param in module.named_parameters():
+                        with deepspeed.zero.GatheredParameters(
+                                param, modifier_rank=0):
+                            if local_rank == 0 and total_rank == 0:
+                                state_dict[name] = param.data.cpu().clone()
+                    for name, buf in module.named_buffers():
+                        if local_rank == 0 and total_rank == 0:
+                            state_dict[name] = buf.cpu().clone()
+                    if local_rank == 0 and total_rank == 0:
+                        torch.save(state_dict, save_path)
+                else:
+                    if local_rank == 0 and total_rank == 0:
+                        torch.save(module.state_dict(), save_path)
+
+        iter_index += 1
+
+    avg_loss = losses.avg
 
     return avg_loss
 
@@ -583,11 +827,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
                         loss_value = criterion(image_features, text_features,
                                                logit_scale, config)
 
-                # 各loss数量级除以accumulation_steps
-                for key, value in loss_value.items():
-                    loss_value[key] = value / config.accumulation_steps
-
-                # 总loss是各loss的累加,因此其数量级也已经除以accumulation_steps
+                # CLIP对比学习中每次backward只对当前batch的live features回传梯度，K次backward的梯度之和恰好等于完整的全batch梯度，无需再做accumulation_steps平均
                 loss = 0.
                 for key, value in loss_value.items():
                     loss += value
@@ -663,9 +903,9 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
                 iters // config.accumulation_steps)
         if iter_index % int(
                 config.print_interval * config.accumulation_steps) == 0:
-            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss*config.accumulation_steps:.4f}, '
+            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss:.4f}, '
             for key, value in loss_value.items():
-                log_info += f'{key}: {value*config.accumulation_steps:.4f}, '
+                log_info += f'{key}: {value:.4f}, '
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
@@ -688,7 +928,6 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
         iter_index += 1
 
     avg_loss = losses.avg
-    avg_loss = avg_loss * config.accumulation_steps
 
     return avg_loss
 
@@ -904,11 +1143,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
                         loss_value = criterion(image_features, text_features,
                                                logit_scale, config)
 
-                # 各loss数量级除以accumulation_steps
-                for key, value in loss_value.items():
-                    loss_value[key] = value / config.accumulation_steps
-
-                # 总loss是各loss的累加,因此其数量级也已经除以accumulation_steps
+                # CLIP对比学习中每次backward只对当前batch的live features回传梯度，K次backward的梯度之和恰好等于完整的全batch梯度，无需再做accumulation_steps平均
                 loss = 0.
                 for key, value in loss_value.items():
                     loss += value
@@ -983,9 +1218,9 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
                 iters // config.accumulation_steps)
         if iter_index % int(
                 config.print_interval * config.accumulation_steps) == 0:
-            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss*config.accumulation_steps:.4f}, '
+            log_info = f'train: epoch {epoch:0>4d}, iter [{accumulation_iter_index:0>5d}, {accumulation_iters:0>5d}], lr: {scheduler.current_lr:.6f}, loss: {loss:.4f}, '
             for key, value in loss_value.items():
-                log_info += f'{key}: {value*config.accumulation_steps:.4f}, '
+                log_info += f'{key}: {value:.4f}, '
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
 
@@ -1008,7 +1243,6 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
         iter_index += 1
 
     avg_loss = losses.avg
-    avg_loss = avg_loss * config.accumulation_steps
 
     return avg_loss
 

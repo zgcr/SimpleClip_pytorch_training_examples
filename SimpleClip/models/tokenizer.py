@@ -431,7 +431,7 @@ class SigLipTokenizer:
         self.VOCAB_FILES = {
             # english, vocab_size=32000
             "c4-en":
-            "http://storage.googleapis.com/t5-data/vocabs/cc_en.32000/sentencepiece.model",
+            "/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/c4-en-sentencepiece.model",
             # used in multilingual models (mT5, PaLI), vocab_size=250000
             "mc4":
             "/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/mc4-sentencepiece.model",
