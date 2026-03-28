@@ -1,9 +1,7 @@
-HF_HUB_OFFLINE=1
-
 CUDA_VISIBLE_DEVICES=0 torchrun \
     --nproc_per_node=1 \
     --master_addr 127.0.1.0 \
     --master_port 10000 \
-    ../../tools/train_huggingface_clip_model.py \
+    ../../tools/train_huggingface_clip_model_multi_node_nas.py \
     --work-dir ./
 

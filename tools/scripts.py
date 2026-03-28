@@ -880,7 +880,11 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            model.module.model.logit_scale.clamp_(0, math.log(100))
+            if config.use_compile:
+                model._orig_mod.module.model.logit_scale.clamp_(
+                    0, math.log(100))
+            else:
+                model.module.model.logit_scale.clamp_(0, math.log(100))
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
@@ -916,9 +920,9 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
                     if config.use_compile:
-                        save_model = model._orig_mod.module.state_dict()
+                        save_model = model._orig_mod.module.model.state_dict()
                     else:
-                        save_model = model.module.state_dict()
+                        save_model = model.module.model.state_dict()
 
                     torch.save(
                         save_model,
@@ -1195,7 +1199,11 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
         with torch.no_grad():
-            model.module.model.logit_scale.clamp_(0, math.log(100))
+            if config.use_compile:
+                model._orig_mod.module.model.logit_scale.clamp_(
+                    0, math.log(100))
+            else:
+                model.module.model.logit_scale.clamp_(0, math.log(100))
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
@@ -1231,9 +1239,9 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
                     if config.use_compile:
-                        save_model = model._orig_mod.module.state_dict()
+                        save_model = model._orig_mod.module.model.state_dict()
                     else:
-                        save_model = model.module.state_dict()
+                        save_model = model.module.model.state_dict()
 
                     torch.save(
                         save_model,

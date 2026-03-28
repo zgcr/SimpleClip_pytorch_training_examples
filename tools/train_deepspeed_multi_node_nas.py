@@ -16,8 +16,356 @@ import deepspeed
 from torch.utils.data import DataLoader
 
 from tools.scripts import train_clip_model_deepspeed
-from tools.utils import (get_logger, set_seed, worker_seed_init_fn,
-                         build_optimizer, Scheduler)
+from tools.utils import (get_logger, set_seed, worker_seed_init_fn, Scheduler)
+
+
+def build_param_groups(config, model):
+    """Build parameter groups for optimizer (weight decay differentiation).
+    Returns (model_params_weight_decay_list, model_layer_weight_decay_list).
+    Does NOT create the optimizer — DeepSpeed will create it from ds_config.
+    """
+    optimizer_name = config.optimizer[0]
+    optimizer_parameters = config.optimizer[1]
+    assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
+
+    lr = optimizer_parameters['lr']
+    weight_decay = optimizer_parameters['weight_decay']
+
+    # For Muon, DeepSpeed native implementation handles muon/adamw param
+    # split internally (>=2D params use Muon, others use AdamW fallback).
+    # We only need to pass all trainable parameters and build logging info.
+    if optimizer_name == 'Muon':
+        exclude_muon_layer_name_list = [
+            'position_encoding',
+            'cls_token',
+            'patch_embedding',
+        ]
+        if 'exclude_muon_layer_name_list' in optimizer_parameters.keys(
+        ) and isinstance(optimizer_parameters['exclude_muon_layer_name_list'],
+                         list):
+            exclude_muon_layer_name_list = (
+                exclude_muon_layer_name_list +
+                optimizer_parameters['exclude_muon_layer_name_list'])
+
+        muon_param_names = []
+        adamw_param_names = []
+        all_params = []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+            all_params.append(param)
+            use_muon = (
+                param.ndim >= 2
+                and not any(exclude_name in name
+                            for exclude_name in exclude_muon_layer_name_list))
+            param.use_muon = use_muon
+            if use_muon:
+                muon_param_names.append(name)
+            else:
+                adamw_param_names.append(name)
+
+        model_params_weight_decay_list = all_params
+
+        model_layer_weight_decay_list = []
+        if muon_param_names:
+            model_layer_weight_decay_list.append({
+                'name': muon_param_names,
+                'optimizer': 'Muon',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+        if adamw_param_names:
+            model_layer_weight_decay_list.append({
+                'name': adamw_param_names,
+                'optimizer': 'AdamW',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+
+        return model_params_weight_decay_list, model_layer_weight_decay_list
+
+    # For SGD/AdamW, handle per-layer weight decay and lr differentiation.
+    global_weight_decay = True if 'global_weight_decay' not in optimizer_parameters.keys(
+    ) else optimizer_parameters['global_weight_decay']
+
+    no_weight_decay_layer_name_list = []
+    if 'no_weight_decay_layer_name_list' in optimizer_parameters.keys(
+    ) and isinstance(optimizer_parameters['no_weight_decay_layer_name_list'],
+                     list):
+        no_weight_decay_layer_name_list = optimizer_parameters[
+            'no_weight_decay_layer_name_list']
+
+    # training trick only for VIT
+    if 'lr_layer_decay' in optimizer_parameters.keys(
+    ) and 'lr_layer_decay_block' in optimizer_parameters.keys(
+    ) and 'block_name' in optimizer_parameters.keys():
+        lr_layer_decay = optimizer_parameters['lr_layer_decay']
+        lr_layer_decay_block = optimizer_parameters['lr_layer_decay_block']
+        block_name = optimizer_parameters['block_name']
+
+        num_layers = len(lr_layer_decay_block) + 1
+        lr_layer_scales = list(lr_layer_decay**(num_layers - i)
+                               for i in range(num_layers + 1))
+
+        layer_scale_id_0_name_list = [
+            'position_encoding',
+            'cls_token',
+            'patch_embedding',
+        ]
+
+        param_layer_name_list = []
+        param_layer_weight_dict = {}
+        param_layer_decay_dict, param_layer_lr_dict = {}, {}
+        param_layer_lr_scale_dict = {}
+
+        not_group_layer_name_list = []
+        not_group_layer_weight_dict = {}
+        not_group_layer_decay_dict, not_group_layer_lr_dict = {}, {}
+
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            in_not_group_layer = False
+            if block_name in name:
+                not_group_layer_name_list.append(name)
+                not_group_layer_weight_dict[name] = param
+                in_not_group_layer = True
+            else:
+                param_layer_name_list.append(name)
+                param_layer_weight_dict[name] = param
+
+            if in_not_group_layer is False:
+                if any(per_layer_scale_id_0_name in name
+                       for per_layer_scale_id_0_name in
+                       layer_scale_id_0_name_list):
+                    param_layer_lr_scale_dict[name] = lr_layer_scales[0]
+                else:
+                    param_layer_lr_scale_dict[name] = 1.
+
+            if global_weight_decay is False:
+                if param.ndim == 1 or any(no_weight_decay_layer_name in name
+                                          for no_weight_decay_layer_name in
+                                          no_weight_decay_layer_name_list):
+                    if in_not_group_layer:
+                        not_group_layer_decay_dict[name] = 0.
+                    else:
+                        param_layer_decay_dict[name] = 0.
+                else:
+                    per_layer_weight_decay = weight_decay
+                    if 'sub_layer_weight_decay' in optimizer_parameters.keys(
+                    ) and isinstance(
+                            optimizer_parameters['sub_layer_weight_decay'],
+                            dict):
+                        for per_sub_layer_name_prefix, per_sub_layer_weight_decay in optimizer_parameters[
+                                'sub_layer_weight_decay'].items():
+                            if per_sub_layer_name_prefix in name:
+                                per_layer_weight_decay = per_sub_layer_weight_decay
+                                break
+
+                    if in_not_group_layer:
+                        not_group_layer_decay_dict[
+                            name] = per_layer_weight_decay
+                    else:
+                        param_layer_decay_dict[name] = per_layer_weight_decay
+            else:
+                if in_not_group_layer:
+                    not_group_layer_decay_dict[name] = weight_decay
+                else:
+                    param_layer_decay_dict[name] = weight_decay
+
+            per_layer_lr = lr
+            if 'sub_layer_lr' in optimizer_parameters.keys() and isinstance(
+                    optimizer_parameters['sub_layer_lr'], dict):
+                for per_sub_layer_name_prefix, per_sub_layer_lr in optimizer_parameters[
+                        'sub_layer_lr'].items():
+                    if per_sub_layer_name_prefix in name:
+                        per_layer_lr = per_sub_layer_lr
+                        break
+            if in_not_group_layer:
+                not_group_layer_lr_dict[name] = per_layer_lr
+            else:
+                param_layer_lr_dict[name] = per_layer_lr
+
+        assert len(param_layer_name_list) == len(
+            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
+                param_layer_lr_dict) == len(param_layer_lr_scale_dict)
+
+        assert len(not_group_layer_name_list) == len(
+            not_group_layer_weight_dict) == len(
+                not_group_layer_decay_dict) == len(not_group_layer_lr_dict)
+
+        per_group_weight_nums = len(not_group_layer_name_list) // len(
+            lr_layer_decay_block)
+        for layer_id in range(0, len(lr_layer_decay_block)):
+            for per_group_id in range(per_group_weight_nums):
+                per_group_layer_names = not_group_layer_name_list[
+                    layer_id * per_group_weight_nums + per_group_id]
+
+                if not isinstance(per_group_layer_names, list):
+                    per_layer_name = per_group_layer_names
+                    param_layer_name_list.append(per_layer_name)
+                    param_layer_weight_dict[
+                        per_layer_name] = not_group_layer_weight_dict[
+                            per_layer_name]
+                    param_layer_decay_dict[
+                        per_layer_name] = not_group_layer_decay_dict[
+                            per_layer_name]
+                    param_layer_lr_dict[
+                        per_layer_name] = not_group_layer_lr_dict[
+                            per_layer_name]
+                    param_layer_lr_scale_dict[
+                        per_layer_name] = lr_layer_scales[layer_id + 1]
+                else:
+                    for per_layer_name in per_group_layer_names:
+                        param_layer_name_list.append(per_layer_name)
+                        param_layer_weight_dict[
+                            per_layer_name] = not_group_layer_weight_dict[
+                                per_layer_name]
+                        param_layer_decay_dict[
+                            per_layer_name] = not_group_layer_decay_dict[
+                                per_layer_name]
+                        param_layer_lr_dict[
+                            per_layer_name] = not_group_layer_lr_dict[
+                                per_layer_name]
+                        param_layer_lr_scale_dict[
+                            per_layer_name] = lr_layer_scales[layer_id + 1]
+
+        assert len(param_layer_name_list) == len(
+            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
+                param_layer_lr_dict) == len(param_layer_lr_scale_dict)
+
+        unique_decays = list(set(param_layer_decay_dict.values()))
+        unique_lrs = list(set(param_layer_lr_dict.values()))
+        unique_lr_scales = list(set(param_layer_lr_scale_dict.values()))
+
+        lr_weight_decay_combination = []
+        for per_decay in unique_decays:
+            for per_lr in unique_lrs:
+                for per_lr_scale in unique_lr_scales:
+                    lr_weight_decay_combination.append(
+                        [per_decay, per_lr, per_lr_scale])
+
+        model_params_weight_decay_list = []
+        model_layer_weight_decay_list = []
+        for per_decay, per_lr, per_lr_scale in lr_weight_decay_combination:
+            per_decay_lr_lrscale_param_list, per_decay_lr_lrscale_name_list = [], []
+            for per_layer_name in param_layer_name_list:
+                per_layer_weight = param_layer_weight_dict[per_layer_name]
+                per_layer_weight_decay = param_layer_decay_dict[per_layer_name]
+                per_layer_lr = param_layer_lr_dict[per_layer_name]
+                per_layer_lr_scale = param_layer_lr_scale_dict[per_layer_name]
+
+                if per_layer_weight_decay == per_decay and per_layer_lr == per_lr and per_layer_lr_scale == per_lr_scale:
+                    per_decay_lr_lrscale_param_list.append(per_layer_weight)
+                    per_decay_lr_lrscale_name_list.append(per_layer_name)
+
+            assert len(per_decay_lr_lrscale_param_list) == len(
+                per_decay_lr_lrscale_name_list)
+
+            if len(per_decay_lr_lrscale_param_list) > 0:
+                model_params_weight_decay_list.append({
+                    'params':
+                    per_decay_lr_lrscale_param_list,
+                    'weight_decay':
+                    per_decay,
+                    'lr':
+                    per_lr * per_lr_scale,
+                })
+                model_layer_weight_decay_list.append({
+                    'name': per_decay_lr_lrscale_name_list,
+                    'weight_decay': per_decay,
+                    'lr': per_lr,
+                    'lr_scale': per_lr_scale,
+                })
+
+        assert len(model_params_weight_decay_list) == len(
+            model_layer_weight_decay_list)
+
+    else:
+        param_layer_name_list = []
+        param_layer_weight_dict = {}
+        param_layer_decay_dict, param_layer_lr_dict = {}, {}
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            param_layer_name_list.append(name)
+            param_layer_weight_dict[name] = param
+
+            if global_weight_decay is False:
+                if param.ndim == 1 or any(no_weight_decay_layer_name in name
+                                          for no_weight_decay_layer_name in
+                                          no_weight_decay_layer_name_list):
+                    param_layer_decay_dict[name] = 0.
+                else:
+                    per_layer_weight_decay = weight_decay
+                    if 'sub_layer_weight_decay' in optimizer_parameters.keys(
+                    ) and isinstance(
+                            optimizer_parameters['sub_layer_weight_decay'],
+                            dict):
+                        for per_sub_layer_name_prefix, per_sub_layer_weight_decay in optimizer_parameters[
+                                'sub_layer_weight_decay'].items():
+                            if per_sub_layer_name_prefix in name:
+                                per_layer_weight_decay = per_sub_layer_weight_decay
+                                break
+                    param_layer_decay_dict[name] = per_layer_weight_decay
+            else:
+                param_layer_decay_dict[name] = weight_decay
+
+            per_layer_lr = lr
+            if 'sub_layer_lr' in optimizer_parameters.keys() and isinstance(
+                    optimizer_parameters['sub_layer_lr'], dict):
+                for per_sub_layer_name_prefix, per_sub_layer_lr in optimizer_parameters[
+                        'sub_layer_lr'].items():
+                    if per_sub_layer_name_prefix in name:
+                        per_layer_lr = per_sub_layer_lr
+                        break
+            param_layer_lr_dict[name] = per_layer_lr
+
+        assert len(param_layer_name_list) == len(
+            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
+                param_layer_lr_dict)
+
+        unique_decays = list(set(param_layer_decay_dict.values()))
+        unique_lrs = list(set(param_layer_lr_dict.values()))
+
+        lr_weight_decay_combination = []
+        for per_decay in unique_decays:
+            for per_lr in unique_lrs:
+                lr_weight_decay_combination.append([per_decay, per_lr])
+
+        model_params_weight_decay_list = []
+        model_layer_weight_decay_list = []
+        for per_decay, per_lr in lr_weight_decay_combination:
+            per_decay_lr_param_list, per_decay_lr_name_list = [], []
+            for per_layer_name in param_layer_name_list:
+                per_layer_weight = param_layer_weight_dict[per_layer_name]
+                per_layer_weight_decay = param_layer_decay_dict[per_layer_name]
+                per_layer_lr = param_layer_lr_dict[per_layer_name]
+
+                if per_layer_weight_decay == per_decay and per_layer_lr == per_lr:
+                    per_decay_lr_param_list.append(per_layer_weight)
+                    per_decay_lr_name_list.append(per_layer_name)
+
+            assert len(per_decay_lr_param_list) == len(per_decay_lr_name_list)
+
+            if len(per_decay_lr_param_list) > 0:
+                model_params_weight_decay_list.append({
+                    'params': per_decay_lr_param_list,
+                    'weight_decay': per_decay,
+                    'lr': per_lr,
+                })
+                model_layer_weight_decay_list.append({
+                    'name': per_decay_lr_name_list,
+                    'weight_decay': per_decay,
+                    'lr': per_lr,
+                })
+
+        assert len(model_params_weight_decay_list) == len(
+            model_layer_weight_decay_list)
+
+    return model_params_weight_decay_list, model_layer_weight_decay_list
 
 
 def build_deepspeed_config(config):
@@ -91,6 +439,69 @@ def build_deepspeed_config(config):
         # ZeRO-3下每个rank只持有1/N参数分片,直接state_dict()只能拿到本rank的模型分片参数。开启此选项后,调用model_engine.save_checkpoint()时DeepSpeed 会自动执行all-gather将完整的16-bit权重收集到一起保存
         ds_config["zero_optimization"][
             "stage3_gather_16bit_weights_on_model_save"] = True
+
+    # Optimizer (let DeepSpeed create the optimizer natively for ZeRO
+    # compatibility, especially for Muon which requires native support
+    # under ZeRO stage 1/2/3).
+    optimizer_name = config.optimizer[0]
+    optimizer_parameters = config.optimizer[1]
+    assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
+
+    if optimizer_name == 'SGD':
+        momentum = 0.9 if 'momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['momentum']
+        nesterov = False if 'nesterov' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['nesterov']
+        ds_config["optimizer"] = {
+            "type": "SGD",
+            "params": {
+                "lr": optimizer_parameters['lr'],
+                "momentum": momentum,
+                "nesterov": nesterov,
+                "weight_decay": optimizer_parameters['weight_decay'],
+            }
+        }
+    elif optimizer_name == 'AdamW':
+        beta1 = 0.9 if 'beta1' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['beta1']
+        beta2 = 0.999 if 'beta2' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['beta2']
+        eps = 1e-08 if 'eps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['eps']
+        ds_config["optimizer"] = {
+            "type": "AdamW",
+            "params": {
+                "lr": optimizer_parameters['lr'],
+                "betas": [beta1, beta2],
+                "eps": eps,
+                "weight_decay": optimizer_parameters['weight_decay'],
+            }
+        }
+    elif optimizer_name == 'Muon':
+        momentum = 0.95 if 'momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['momentum']
+        nesterov = True if 'nesterov' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['nesterov']
+        ns_steps = 5 if 'ns_steps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['ns_steps']
+        adamw_beta1 = 0.9 if 'adamw_beta1' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_beta1']
+        adamw_beta2 = 0.999 if 'adamw_beta2' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_beta2']
+        adamw_eps = 1e-08 if 'adamw_eps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['adamw_eps']
+        ds_config["optimizer"] = {
+            "type": "Muon",
+            "params": {
+                "lr": optimizer_parameters['lr'],
+                "wd": optimizer_parameters['weight_decay'],
+                "momentum": momentum,
+                "nesterov": nesterov,
+                "ns_steps": ns_steps,
+                "adamw_betas": [adamw_beta1, adamw_beta2],
+                "adamw_eps": adamw_eps,
+            }
+        }
 
     return ds_config
 
@@ -230,7 +641,8 @@ def main():
         log_info = f'name: {name}, grad: {buffer.requires_grad}'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    optimizer, model_layer_weight_decay_list = build_optimizer(config, model)
+    model_params_weight_decay_list, model_layer_weight_decay_list = build_param_groups(
+        config, model)
 
     log_info = f'-------------layers weight decay---------------'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
@@ -246,12 +658,6 @@ def main():
             log_info = f'name: {name}, lr: {layer_lr}, weight_decay: {layer_weight_decay}, lr_scale: {lr_scale}'
             logger.info(
                 log_info) if local_rank == 0 and total_rank == 0 else None
-
-    # Build scheduler with original optimizer before DeepSpeed wrapping,
-    # consistent with the original code where scheduler is built before DDP.
-    # DeepSpeed's optimizer wrapper internally delegates to this same optimizer
-    # object, so LR changes made by the scheduler are reflected in training.
-    scheduler = Scheduler(config, optimizer)
 
     # Check torch compile support
     config.compile_support = False
@@ -283,13 +689,20 @@ def main():
     log_info = f'DeepSpeed config: {ds_config}'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    # Pass optimizer to DeepSpeed but do NOT reassign the optimizer variable.
-    # The scheduler holds a reference to the original optimizer object, and
-    # DeepSpeed's wrapper internally delegates to it, so LR adjustments by
-    # the scheduler are correctly picked up during model_engine.step().
-    model_engine, _, _, _ = deepspeed.initialize(model=model,
-                                                 optimizer=optimizer,
-                                                 config=ds_config)
+    # Let DeepSpeed create the optimizer from ds_config (which includes the
+    # "optimizer" section). Pass model_parameters for per-layer weight decay
+    # and lr differentiation. DeepSpeed natively handles SGD/AdamW/Muon,
+    # ensuring correct optimizer state partitioning under ZeRO stage 1/2/3.
+    # for deepspeed==0.18.8, Muon optimizer is not yet compatible with ZeRO Stage 3,only support ZeRO stage 0/1/2.
+    model_engine, optimizer, _, _ = deepspeed.initialize(
+        model=model,
+        model_parameters=model_params_weight_decay_list,
+        config=ds_config)
+
+    # Build scheduler after DeepSpeed creates the optimizer. The scheduler
+    # adjusts LR via optimizer.param_groups which DeepSpeed's optimizer
+    # wrapper correctly exposes and delegates to the underlying optimizer.
+    scheduler = Scheduler(config, optimizer)
 
     # deepspeed==0.18.8
     if config.accumulation_steps > 1:

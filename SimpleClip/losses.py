@@ -282,8 +282,11 @@ class SigLipLoss(nn.Module):
                 num_bidir, remainder = divmod(config.gpus_num - 1, 2)
                 for i in range(num_bidir):
                     text_features_recv = neighbour_exchange_bidir_with_grad(
-                        left_rank, right_rank, text_features_to_left,
-                        text_features_to_right)
+                        left_rank,
+                        right_rank,
+                        text_features_to_left,
+                        text_features_to_right,
+                        group=config.group)
                     for f in text_features_recv:
                         loss += self.compute_sigmoid_loss(image_features,
                                                           f,
@@ -294,7 +297,10 @@ class SigLipLoss(nn.Module):
 
                 if remainder:
                     text_features_recv = neighbour_exchange_with_grad(
-                        left_rank, right_rank, text_features_to_right)
+                        left_rank,
+                        right_rank,
+                        text_features_to_right,
+                        group=config.group)
                     loss += self.compute_sigmoid_loss(image_features,
                                                       text_features_recv,
                                                       logit_scale,
@@ -308,7 +314,10 @@ class SigLipLoss(nn.Module):
                 text_features_to_right = text_features
                 for i in range(config.gpus_num - 1):
                     text_features_from_left = neighbour_exchange_with_grad(
-                        left_rank, right_rank, text_features_to_right)
+                        left_rank,
+                        right_rank,
+                        text_features_to_right,
+                        group=config.group)
                     loss += self.compute_sigmoid_loss(image_features,
                                                       text_features_from_left,
                                                       logit_scale,
@@ -459,7 +468,7 @@ class DistillClipLoss(nn.Module):
 
         # 3. 生成真实标签
         logit_nums = stu_image_logits.shape[0]
-        labels = self.get_ground_truth(stu_image_features, logit_nums)
+        labels = self.get_ground_truth(stu_image_features, logit_nums, config)
 
         # 4. 计算对称交叉熵损失
         contrastive_loss = (F.cross_entropy(stu_image_logits, labels) +
