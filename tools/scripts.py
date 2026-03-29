@@ -533,8 +533,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
             else:
                 logit_scale = model.module.logit_scale
 
-            if hasattr(config, 'deepspeed_zero_stage'
-                       ) and config.deepspeed_zero_stage == 3:
+            if config.deepspeed_zero_stage == 3:
                 with deepspeed.zero.GatheredParameters(logit_scale,
                                                        modifier_rank=0):
                     logit_scale.clamp_(0, math.log(100))
@@ -582,12 +581,10 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                     config.checkpoint_dir,
                     f'step_{total_accumulation_iters}.pth')
 
-                if hasattr(config, 'deepspeed_zero_stage'
-                           ) and config.deepspeed_zero_stage == 3:
+                if config.deepspeed_zero_stage == 3:
                     state_dict = {}
                     for name, param in module.named_parameters():
-                        with deepspeed.zero.GatheredParameters(
-                                param, modifier_rank=0):
+                        with deepspeed.zero.GatheredParameters(param):
                             if local_rank == 0 and total_rank == 0:
                                 state_dict[name] = param.data.cpu().clone()
                     for name, buf in module.named_buffers():
