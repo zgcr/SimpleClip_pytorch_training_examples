@@ -208,7 +208,7 @@ class HuggingFaceOpenClipModelImageCaptionPairCollater:
         }
 
 
-class HuggingFaceOpenClipModelZeroShortCollater:
+class HuggingFaceOpenClipModelZeroShotCollater:
 
     def __init__(self):
         pass
@@ -248,7 +248,7 @@ class HuggingFaceClipModelImageCaptionPairCollater:
         }
 
 
-class HuggingFaceClipModelZeroShortCollater:
+class HuggingFaceClipModelZeroShotCollater:
 
     def __init__(self, processor, max_length):
         self.processor = processor
@@ -258,10 +258,7 @@ class HuggingFaceClipModelZeroShortCollater:
         images = [s['image'] for s in data]
         labels = [s['label'] for s in data]
 
-        inputs = self.processor(images=images,
-                                return_tensors='pt',
-                                padding="max_length",
-                                max_length=self.max_length)
+        inputs = self.processor(images=images, return_tensors='pt')
 
         return {
             'input': inputs,
@@ -341,7 +338,7 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
 
     # resize clip visual position encoding layer with new input size
     if 'visual.positional_embedding' in saved_state_dict.keys(
-    ) and 'visual.positional_embedding' not in not_loaded_save_state_dict:
+    ) and 'visual.positional_embedding' in not_loaded_save_state_dict:
         old_visual_position_embedding = saved_state_dict[
             'visual.positional_embedding']
         grid_size = model.visual.grid_size
@@ -382,7 +379,7 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
 
     # resize clip text position encoding layer with new input size
     if 'text.positional_embedding' in saved_state_dict.keys(
-    ) and 'text.positional_embedding' not in not_loaded_save_state_dict:
+    ) and 'text.positional_embedding' in not_loaded_save_state_dict:
         old_text_position_embedding = saved_state_dict[
             'text.positional_embedding']
 
@@ -410,6 +407,62 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
 
             filtered_state_dict[
                 'text.positional_embedding'] = new_text_position_embedding
+
+    # resize clip visual pos_embed layer with new input size (for clip.py models)
+    if 'visual.pos_embed' in saved_state_dict.keys(
+    ) and 'visual.pos_embed' in not_loaded_save_state_dict:
+        old_visual_pos_embed = saved_state_dict['visual.pos_embed']
+        new_visual_pos_embed_shape = model.state_dict(
+        )['visual.pos_embed'].shape
+
+        if old_visual_pos_embed.shape != new_visual_pos_embed_shape:
+            print('resize clip visual pos_embed!')
+            # old_visual_pos_embed: [1, old_num_patches+1, embed_dim]
+            pos_emb_tok = old_visual_pos_embed[:, :1, :]
+            pos_emb_img = old_visual_pos_embed[:, 1:, :]
+
+            old_num_patches = pos_emb_img.shape[1]
+            old_grid = int(math.sqrt(old_num_patches))
+
+            new_num_patches = new_visual_pos_embed_shape[1] - 1
+            new_grid = int(math.sqrt(new_num_patches))
+
+            pos_emb_img = pos_emb_img.reshape(1, old_grid, old_grid,
+                                              -1).permute(0, 3, 1, 2)
+            pos_emb_img = F.interpolate(pos_emb_img,
+                                        size=(new_grid, new_grid),
+                                        mode='bicubic',
+                                        align_corners=False)
+            pos_emb_img = pos_emb_img.permute(0, 2, 3, 1).reshape(
+                1, new_grid * new_grid, -1)
+
+            new_visual_pos_embed = torch.cat([pos_emb_tok, pos_emb_img], dim=1)
+            filtered_state_dict['visual.pos_embed'] = new_visual_pos_embed
+            not_loaded_save_state_dict.remove('visual.pos_embed')
+
+    # resize clip text pos_embed layer with new input size (for clip.py models)
+    if 'text.pos_embed' in saved_state_dict.keys(
+    ) and 'text.pos_embed' in not_loaded_save_state_dict:
+        old_text_pos_embed = saved_state_dict['text.pos_embed']
+        new_text_pos_embed_shape = model.state_dict()['text.pos_embed'].shape
+
+        if old_text_pos_embed.shape != new_text_pos_embed_shape:
+            print('resize clip text pos_embed!')
+            embed_dim = old_text_pos_embed.shape[2]
+
+            assert embed_dim == new_text_pos_embed_shape[
+                2], 'text pos_embed embed_dim changed!'
+
+            old_text_pos_embed = old_text_pos_embed.permute(0, 2, 1)
+            old_text_pos_embed = F.interpolate(
+                old_text_pos_embed,
+                size=new_text_pos_embed_shape[1],
+                mode='linear',
+                align_corners=False)
+            new_text_pos_embed = old_text_pos_embed.permute(0, 2, 1)
+
+            filtered_state_dict['text.pos_embed'] = new_text_pos_embed
+            not_loaded_save_state_dict.remove('text.pos_embed')
 
     if len(filtered_state_dict) == 0:
         print('No pretrained parameters to load!')

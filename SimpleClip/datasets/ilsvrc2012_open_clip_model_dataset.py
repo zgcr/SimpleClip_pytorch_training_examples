@@ -136,7 +136,7 @@ if __name__ == '__main__':
 
     from tqdm import tqdm
 
-    from SimpleClip.common import HuggingFaceOpenClipModelZeroShortCollater
+    from SimpleClip.common import HuggingFaceOpenClipModelZeroShotCollater
 
     from SimpleClip.huggingface_clip_models.huggingface_open_clip_model import HuggingFaceOpenClipModel
     net = HuggingFaceOpenClipModel(
@@ -191,7 +191,7 @@ if __name__ == '__main__':
             break
 
     from torch.utils.data import DataLoader
-    collater = HuggingFaceOpenClipModelZeroShortCollater()
+    collater = HuggingFaceOpenClipModelZeroShotCollater()
     train_loader = DataLoader(ilsvrc2012traindataset,
                               batch_size=4,
                               shuffle=True,

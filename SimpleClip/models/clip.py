@@ -165,11 +165,9 @@ class VisionEncoder(nn.Module):
 
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
 
-        pos_embed = self.get_2d_sincos_pos_embed(embed_dim,
-                                                 image_size // patch_size,
-                                                 cls_token=True)
+        num_patches = (image_size // patch_size)**2
         self.pos_embed = nn.Parameter(
-            torch.from_numpy(pos_embed).float().unsqueeze(0) * 0.02)
+            torch.zeros(1, num_patches + 1, embed_dim))
 
         self.blocks = nn.ModuleList([
             TransformerEncoderLayer(
@@ -195,41 +193,7 @@ class VisionEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
 
         nn.init.trunc_normal_(self.cls_token, std=0.02)
-
-    def get_1d_sincos_encode(self, embed_dim, positions):
-        assert embed_dim % 2 == 0
-        omega = np.arange(embed_dim // 2, dtype=np.float64)
-        omega /= (embed_dim / 2.0)
-        omega = 1.0 / (10000.0**omega)
-
-        pos = np.asarray(positions, dtype=np.float64)
-        out = np.outer(pos, omega)
-
-        emb = np.concatenate([np.sin(out), np.cos(out)], axis=1)
-        emb = emb.astype(np.float32)
-
-        return emb
-
-    def get_2d_sincos_pos_embed(self, embed_dim, grid_size, cls_token=False):
-        """
-        为 Vision Encoder 生成 2D 正弦余弦位置编码。
-        embed_dim 的前半部分编码行坐标，后半部分编码列坐标。
-        """
-        assert embed_dim % 2 == 0
-        grid_h = np.arange(grid_size, dtype=np.float32)
-        grid_w = np.arange(grid_size, dtype=np.float32)
-        grid_w, grid_h = np.meshgrid(grid_w, grid_h)
-
-        emb_h = self.get_1d_sincos_encode(embed_dim // 2, grid_h.flatten())
-        emb_w = self.get_1d_sincos_encode(embed_dim // 2, grid_w.flatten())
-        pos_embed = np.concatenate([emb_h, emb_w], axis=1)
-
-        if cls_token:
-            pos_embed = np.concatenate(
-                [np.zeros([1, embed_dim], dtype=np.float32), pos_embed],
-                axis=0)
-
-        return pos_embed
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def forward(self, x):
         x = self.patch_embed(x)
@@ -276,9 +240,8 @@ class TextEncoder(nn.Module):
         self.use_gradient_checkpoint = use_gradient_checkpoint
 
         self.token_embed = nn.Embedding(vocab_size, embed_dim)
-        pos_embed = self.get_1d_sincos_pos_embed(embed_dim, context_length)
-        self.pos_embed = nn.Parameter(
-            torch.from_numpy(pos_embed).float().unsqueeze(0) * 0.02)
+        self.pos_embed = nn.Parameter(torch.zeros(1, context_length,
+                                                  embed_dim))
 
         self.blocks = nn.ModuleList([
             TransformerEncoderLayer(
@@ -306,27 +269,7 @@ class TextEncoder(nn.Module):
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.token_embed.weight, std=0.02)
-
-    def get_1d_sincos_encode(self, embed_dim, positions):
-        assert embed_dim % 2 == 0
-        omega = np.arange(embed_dim // 2, dtype=np.float64)
-        omega /= (embed_dim / 2.0)
-        omega = 1.0 / (10000.0**omega)
-
-        pos = np.asarray(positions, dtype=np.float64)
-        out = np.outer(pos, omega)
-
-        emb = np.concatenate([np.sin(out), np.cos(out)], axis=1)
-        emb = emb.astype(np.float32)
-
-        return emb
-
-    def get_1d_sincos_pos_embed(self, embed_dim, length):
-        """为 Text Encoder 生成 1D 正弦余弦位置编码。"""
-        positions = np.arange(length, dtype=np.float32)
-        emb = self.get_1d_sincos_encode(embed_dim, positions)
-
-        return emb
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
 
     def build_causal_mask(self):
         mask = torch.empty(self.context_length, self.context_length)
@@ -339,7 +282,10 @@ class TextEncoder(nn.Module):
         if pool_type == 'first':
             pooled, tokens = x[:, 0], x[:, 1:]
         elif pool_type == 'last':
-            pooled, tokens = x[:, -1], x[:, :-1]
+            assert text is not None
+            # 找到每个样本最后一个非 PAD token 的位置
+            eos_indices = (text != self.pad_id).sum(dim=-1) - 1
+            pooled, tokens = x[torch.arange(x.shape[0]), eos_indices], x
         elif pool_type == 'argmax':
             assert text is not None
             pooled, tokens = x[torch.arange(x.shape[0]),

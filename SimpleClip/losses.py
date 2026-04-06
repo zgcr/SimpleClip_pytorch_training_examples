@@ -122,7 +122,7 @@ class ClipLoss(nn.Module):
         return loss_dict
 
 
-def neighbour_exchange(from_rank, to_rank, tensor, group):
+def neighbour_exchange(from_rank, to_rank, tensor, group=None):
     tensor_recv = torch.zeros_like(tensor)
     send_op = torch.distributed.P2POp(torch.distributed.isend,
                                       tensor,
@@ -140,8 +140,11 @@ def neighbour_exchange(from_rank, to_rank, tensor, group):
     return tensor_recv
 
 
-def neighbour_exchange_bidir(left_rank, right_rank, tensor_to_left,
-                             tensor_to_right, group):
+def neighbour_exchange_bidir(left_rank,
+                             right_rank,
+                             tensor_to_left,
+                             tensor_to_right,
+                             group=None):
     tensor_from_left = torch.zeros_like(tensor_to_right)
     tensor_from_right = torch.zeros_like(tensor_to_left)
     send_op_left = torch.distributed.P2POp(torch.distributed.isend,
@@ -282,11 +285,8 @@ class SigLipLoss(nn.Module):
                 num_bidir, remainder = divmod(config.gpus_num - 1, 2)
                 for i in range(num_bidir):
                     text_features_recv = neighbour_exchange_bidir_with_grad(
-                        left_rank,
-                        right_rank,
-                        text_features_to_left,
-                        text_features_to_right,
-                        group=config.group)
+                        left_rank, right_rank, text_features_to_left,
+                        text_features_to_right)
                     for f in text_features_recv:
                         loss += self.compute_sigmoid_loss(image_features,
                                                           f,
@@ -297,10 +297,7 @@ class SigLipLoss(nn.Module):
 
                 if remainder:
                     text_features_recv = neighbour_exchange_with_grad(
-                        left_rank,
-                        right_rank,
-                        text_features_to_right,
-                        group=config.group)
+                        left_rank, right_rank, text_features_to_right)
                     loss += self.compute_sigmoid_loss(image_features,
                                                       text_features_recv,
                                                       logit_scale,
@@ -314,10 +311,7 @@ class SigLipLoss(nn.Module):
                 text_features_to_right = text_features
                 for i in range(config.gpus_num - 1):
                     text_features_from_left = neighbour_exchange_with_grad(
-                        left_rank,
-                        right_rank,
-                        text_features_to_right,
-                        group=config.group)
+                        left_rank, right_rank, text_features_to_right)
                     loss += self.compute_sigmoid_loss(image_features,
                                                       text_features_from_left,
                                                       logit_scale,

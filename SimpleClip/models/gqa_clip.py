@@ -335,6 +335,10 @@ class VisionEncoder(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Conv2d):
+                nn.init.trunc_normal_(m.weight, std=0.02)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
         nn.init.trunc_normal_(self.cls_token, std=0.02)
 
     def forward(self, x):
@@ -432,7 +436,10 @@ class TextEncoder(nn.Module):
         if pool_type == 'first':
             pooled, tokens = x[:, 0], x[:, 1:]
         elif pool_type == 'last':
-            pooled, tokens = x[:, -1], x[:, :-1]
+            assert text is not None
+            # 找到每个样本最后一个非 PAD token 的位置
+            eos_indices = (text != self.pad_id).sum(dim=-1) - 1
+            pooled, tokens = x[torch.arange(x.shape[0]), eos_indices], x
         elif pool_type == 'argmax':
             assert text is not None
             pooled, tokens = x[torch.arange(x.shape[0]),

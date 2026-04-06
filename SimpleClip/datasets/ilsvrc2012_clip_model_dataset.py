@@ -131,7 +131,7 @@ if __name__ == '__main__':
 
     from tqdm import tqdm
 
-    from SimpleClip.common import HuggingFaceClipModelZeroShortCollater
+    from SimpleClip.common import HuggingFaceClipModelZeroShotCollater
 
     from SimpleClip.huggingface_clip_models.huggingface_clip_model import HuggingFaceClipModel
     net = HuggingFaceClipModel(hf_model_name='openai/clip-vit-base-patch16',
@@ -173,8 +173,8 @@ if __name__ == '__main__':
             break
 
     from torch.utils.data import DataLoader
-    collater = HuggingFaceClipModelZeroShortCollater(processor=val_processor,
-                                                     max_length=77)
+    collater = HuggingFaceClipModelZeroShotCollater(processor=val_processor,
+                                                    max_length=77)
     train_loader = DataLoader(ilsvrc2012traindataset,
                               batch_size=4,
                               shuffle=True,

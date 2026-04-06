@@ -1,11 +1,11 @@
 .vscode
-__pycache__
+pycache
 checkpoints
 log
-*checkpoints*
-*log*
-*temp*
-*tmp*
+checkpoints
+log
+temp
+tmp
 *.pth
 *.onnx
 *.pt

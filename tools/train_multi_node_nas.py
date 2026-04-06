@@ -67,7 +67,6 @@ def main():
     world_size = torch.distributed.get_world_size()
     # 获取所有node上GPU数量:每个进程分配的GPU数量×所有node上进程数量
     config.gpus_num = int(per_node_per_process_gpus_num * world_size)
-    config.group = torch.distributed.new_group(list(range(config.gpus_num)))
 
     os.makedirs(checkpoint_dir, exist_ok=True)
     os.makedirs(log_dir, exist_ok=True)

@@ -10,7 +10,7 @@ from tools.path import ILSVRC2012_path
 from SimpleClip.huggingface_clip_models.huggingface_open_clip_model import HuggingFaceOpenClipModel
 from SimpleClip.datasets.ilsvrc2012_open_clip_model_dataset import ILSVRC2012Dataset
 from SimpleClip.datasets.ilsvrc2012_class_info import OPENAI_IMAGENET_TEMPLATES, IMAGENET_CLASSNAMES
-from SimpleClip.common import HuggingFaceOpenClipModelZeroShortCollater, load_state_dict
+from SimpleClip.common import HuggingFaceOpenClipModelZeroShotCollater, load_state_dict
 
 import torch
 import torchvision.transforms as transforms
@@ -39,7 +39,7 @@ class config:
         templates=OPENAI_IMAGENET_TEMPLATES,
         set_name='val',
         image_processor=val_processor)
-    val_collater = HuggingFaceOpenClipModelZeroShortCollater()
+    val_collater = HuggingFaceOpenClipModelZeroShotCollater()
 
     seed = 0
     # batch_size is total size

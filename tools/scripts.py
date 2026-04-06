@@ -21,7 +21,9 @@ from torch.amp.autocast_mode import autocast
 from SimpleClip.common import AverageMeter, AccMeter
 
 
-def all_reduce_operation_in_group_for_variables(variables, operator, group):
+def all_reduce_operation_in_group_for_variables(variables,
+                                                operator,
+                                                group=None):
     for i in range(len(variables)):
         if not torch.is_tensor(variables[i]):
             variables[i] = torch.tensor(variables[i]).cuda()
@@ -50,7 +52,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
     log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    iters = len(train_loader.dataset) // config.batch_size
+    iters = len(train_loader)
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
 
@@ -311,15 +313,11 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
-                variables=[value],
-                operator=torch.distributed.ReduceOp.SUM,
-                group=config.group)
+                variables=[value], operator=torch.distributed.ReduceOp.SUM)
             loss_value[key] = value / float(config.gpus_num)
 
         [loss] = all_reduce_operation_in_group_for_variables(
-            variables=[loss],
-            operator=torch.distributed.ReduceOp.SUM,
-            group=config.group)
+            variables=[loss], operator=torch.distributed.ReduceOp.SUM)
         loss = loss / float(config.gpus_num)
         losses.update(loss, images.size(0))
 
@@ -380,7 +378,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
     log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    iters = len(train_loader.dataset) // config.batch_size
+    iters = len(train_loader)
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
     assert config.accumulation_steps == model.gradient_accumulation_steps()
@@ -542,15 +540,11 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
-                variables=[value],
-                operator=torch.distributed.ReduceOp.SUM,
-                group=config.group)
+                variables=[value], operator=torch.distributed.ReduceOp.SUM)
             loss_value[key] = value / float(config.gpus_num)
 
         [loss] = all_reduce_operation_in_group_for_variables(
-            variables=[loss],
-            operator=torch.distributed.ReduceOp.SUM,
-            group=config.group)
+            variables=[loss], operator=torch.distributed.ReduceOp.SUM)
         loss = loss / float(config.gpus_num)
         losses.update(loss, images.size(0))
 
@@ -582,14 +576,15 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                     f'step_{total_accumulation_iters}.pth')
 
                 if config.deepspeed_zero_stage == 3:
-                    state_dict = {}
-                    for name, param in module.named_parameters():
-                        with deepspeed.zero.GatheredParameters(param):
-                            if local_rank == 0 and total_rank == 0:
-                                state_dict[name] = param.data.cpu().clone()
-                    for name, buf in module.named_buffers():
+                    # Batch gather all parameters at once to reduce
+                    # communication rounds under ZeRO-3
+                    all_params = list(module.parameters())
+                    with deepspeed.zero.GatheredParameters(all_params):
                         if local_rank == 0 and total_rank == 0:
-                            state_dict[name] = buf.cpu().clone()
+                            state_dict = {
+                                k: v.cpu().clone()
+                                for k, v in module.state_dict().items()
+                            }
                     if local_rank == 0 and total_rank == 0:
                         torch.save(state_dict, save_path)
                 else:
@@ -623,7 +618,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
     log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    iters = len(train_loader.dataset) // config.batch_size
+    iters = len(train_loader)
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
 
@@ -885,15 +880,11 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
-                variables=[value],
-                operator=torch.distributed.ReduceOp.SUM,
-                group=config.group)
+                variables=[value], operator=torch.distributed.ReduceOp.SUM)
             loss_value[key] = value / float(config.gpus_num)
 
         [loss] = all_reduce_operation_in_group_for_variables(
-            variables=[loss],
-            operator=torch.distributed.ReduceOp.SUM,
-            group=config.group)
+            variables=[loss], operator=torch.distributed.ReduceOp.SUM)
         loss = loss / float(config.gpus_num)
         losses.update(loss, images.size(0))
 
@@ -952,7 +943,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
     log_info = f'use_amp: {config.use_amp}, amp_type: {config.amp_type}!'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    iters = len(train_loader.dataset) // config.batch_size
+    iters = len(train_loader)
     iter_index = 1
     assert config.accumulation_steps >= 1, 'illegal accumulation_steps!'
 
@@ -1204,15 +1195,11 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
 
         for key, value in loss_value.items():
             [value] = all_reduce_operation_in_group_for_variables(
-                variables=[value],
-                operator=torch.distributed.ReduceOp.SUM,
-                group=config.group)
+                variables=[value], operator=torch.distributed.ReduceOp.SUM)
             loss_value[key] = value / float(config.gpus_num)
 
         [loss] = all_reduce_operation_in_group_for_variables(
-            variables=[loss],
-            operator=torch.distributed.ReduceOp.SUM,
-            group=config.group)
+            variables=[loss], operator=torch.distributed.ReduceOp.SUM)
         loss = loss / float(config.gpus_num)
         losses.update(loss, 1)
 
@@ -1303,8 +1290,7 @@ def test_huggingface_open_clip_model(test_loader, model, config):
             images, labels = data['image'], data['label']
             if model_on_cuda:
                 images = images.cuda()
-
-            labels = torch.tensor(labels).long().cuda()
+                labels = torch.tensor(labels).long().cuda()
 
             if config.use_amp:
                 with autocast(device_type="cuda", dtype=config.amp_type):
@@ -1365,8 +1351,7 @@ def test_huggingface_open_clip_model(test_loader, model, config):
             [acc1_correct_num, acc5_correct_num,
              sample_num] = all_reduce_operation_in_group_for_variables(
                  variables=[acc1_correct_num, acc5_correct_num, sample_num],
-                 operator=torch.distributed.ReduceOp.SUM,
-                 group=config.group)
+                 operator=torch.distributed.ReduceOp.SUM)
 
             accs.update(acc1_correct_num, acc5_correct_num, sample_num)
 
@@ -1398,6 +1383,7 @@ def test_huggingface_clip_model(test_loader, model, config):
         text=all_classes_templates_texts,
         return_tensors='pt',
         padding="max_length",
+        truncation=True,
         max_length=config.val_collater.max_length)
     input_ids = text_inputs['input_ids']
     attention_mask = text_inputs.get('attention_mask', None)
@@ -1461,7 +1447,7 @@ def test_huggingface_clip_model(test_loader, model, config):
 
             image_features = F.normalize(image_features, dim=-1)
 
-            logit_scale = model.module.get_logit_scale()
+            logit_scale = model.module.get_logit_scale().exp()
             logit_bias = model.module.get_logit_bias()
 
             logits_per_image = logit_scale * image_features @ text_features.T
@@ -1492,8 +1478,7 @@ def test_huggingface_clip_model(test_loader, model, config):
             [acc1_correct_num, acc5_correct_num,
              sample_num] = all_reduce_operation_in_group_for_variables(
                  variables=[acc1_correct_num, acc5_correct_num, sample_num],
-                 operator=torch.distributed.ReduceOp.SUM,
-                 group=config.group)
+                 operator=torch.distributed.ReduceOp.SUM)
 
             accs.update(acc1_correct_num, acc5_correct_num, sample_num)
 
