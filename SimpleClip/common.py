@@ -408,6 +408,8 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
             filtered_state_dict[
                 'text.positional_embedding'] = new_text_position_embedding
 
+            not_loaded_save_state_dict.remove('text.positional_embedding')
+
     # resize clip visual pos_embed layer with new input size (for clip.py models)
     if 'visual.pos_embed' in saved_state_dict.keys(
     ) and 'visual.pos_embed' in not_loaded_save_state_dict:
