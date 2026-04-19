@@ -442,6 +442,153 @@ def load_state_dict(saved_model_path, model, excluded_layer_name=()):
             filtered_state_dict['visual.pos_embed'] = new_visual_pos_embed
             not_loaded_save_state_dict.remove('visual.pos_embed')
 
+    # resize open_clip standard CLIP root-level positional_embedding (text) with new size
+    # for laion/CLIP-*, apple/DFN*-CLIP-*, timm/vit_*_clip_* models
+    if 'positional_embedding' in saved_state_dict.keys(
+    ) and 'positional_embedding' in not_loaded_save_state_dict:
+        old_text_position_embedding = saved_state_dict['positional_embedding']
+
+        old_text_position_width = old_text_position_embedding.shape[1]
+        new_text_position_width = model.state_dict(
+        )['positional_embedding'].shape[1]
+
+        assert old_text_position_width == new_text_position_width, 'text positional_embedding width changed!'
+
+        old_text_position_num = old_text_position_embedding.shape[0]
+        new_text_position_num = model.state_dict(
+        )['positional_embedding'].shape[0]
+        if old_text_position_num != new_text_position_num:
+            print('resize open_clip root-level text positional_embedding!')
+
+            old_text_position_embedding = old_text_position_embedding.reshape(
+                1, old_text_position_num,
+                old_text_position_width).permute(0, 2, 1)
+            old_text_position_embedding = F.interpolate(
+                old_text_position_embedding,
+                size=new_text_position_num,
+                mode='linear',
+                align_corners=False)
+            old_text_position_embedding = old_text_position_embedding.permute(
+                0, 2, 1)[0]
+            new_text_position_embedding = old_text_position_embedding
+
+            filtered_state_dict[
+                'positional_embedding'] = new_text_position_embedding
+
+            not_loaded_save_state_dict.remove('positional_embedding')
+
+    # resize open_clip SigLIP/SigLIP2 visual.trunk.pos_embed with new input size
+    # for timm/ViT-*-SigLIP*, timm/ViT-*-SigLIP2* models
+    if 'visual.trunk.pos_embed' in saved_state_dict.keys(
+    ) and 'visual.trunk.pos_embed' in not_loaded_save_state_dict:
+        old_visual_trunk_pos_embed = saved_state_dict['visual.trunk.pos_embed']
+        new_visual_trunk_pos_embed_shape = model.state_dict(
+        )['visual.trunk.pos_embed'].shape
+
+        if old_visual_trunk_pos_embed.shape != new_visual_trunk_pos_embed_shape:
+            print('resize open_clip visual.trunk.pos_embed!')
+            # [1, num_patches, embed_dim] - no cls token for SigLIP
+            old_num_patches = old_visual_trunk_pos_embed.shape[1]
+            old_grid = int(math.sqrt(old_num_patches))
+
+            new_num_patches = new_visual_trunk_pos_embed_shape[1]
+            new_grid = int(math.sqrt(new_num_patches))
+
+            pos_emb_img = old_visual_trunk_pos_embed.reshape(
+                1, old_grid, old_grid, -1).permute(0, 3, 1, 2)
+            pos_emb_img = F.interpolate(pos_emb_img,
+                                        size=(new_grid, new_grid),
+                                        mode='bicubic',
+                                        align_corners=False)
+            pos_emb_img = pos_emb_img.permute(0, 2, 3, 1).reshape(
+                1, new_grid * new_grid, -1)
+
+            filtered_state_dict['visual.trunk.pos_embed'] = pos_emb_img
+            not_loaded_save_state_dict.remove('visual.trunk.pos_embed')
+
+    # resize HuggingFace transformers vision_model position_embedding with new input size
+    # for openai/clip-*, google/siglip-*, google/siglip2-* models
+    if 'vision_model.embeddings.position_embedding.weight' in saved_state_dict.keys(
+    ) and 'vision_model.embeddings.position_embedding.weight' in not_loaded_save_state_dict:
+        old_vision_pos_embed = saved_state_dict[
+            'vision_model.embeddings.position_embedding.weight']
+        new_vision_pos_embed_shape = model.state_dict(
+        )['vision_model.embeddings.position_embedding.weight'].shape
+
+        if old_vision_pos_embed.shape != new_vision_pos_embed_shape:
+            print('resize HuggingFace transformers vision position_embedding!')
+            embed_dim = old_vision_pos_embed.shape[1]
+            assert embed_dim == new_vision_pos_embed_shape[
+                1], 'vision position_embedding embed_dim changed!'
+
+            # check if model has cls token (openai/clip has, siglip/siglip2 doesn't)
+            has_cls = 'vision_model.embeddings.class_embedding' in model.state_dict(
+            )
+
+            if has_cls:
+                extra_tokens = 1
+                pos_emb_tok = old_vision_pos_embed[:extra_tokens]
+                pos_emb_img = old_vision_pos_embed[extra_tokens:]
+            else:
+                extra_tokens = 0
+                pos_emb_tok = None
+                pos_emb_img = old_vision_pos_embed
+
+            old_num_patches = pos_emb_img.shape[0]
+            old_grid = int(math.sqrt(old_num_patches))
+
+            new_num_patches = new_vision_pos_embed_shape[0] - extra_tokens
+            new_grid = int(math.sqrt(new_num_patches))
+
+            pos_emb_img = pos_emb_img.reshape(1, old_grid, old_grid,
+                                              -1).permute(0, 3, 1, 2)
+            pos_emb_img = F.interpolate(pos_emb_img,
+                                        size=(new_grid, new_grid),
+                                        mode='bicubic',
+                                        align_corners=False)
+            pos_emb_img = pos_emb_img.permute(0, 2, 3, 1).reshape(
+                new_grid * new_grid, -1)
+
+            if pos_emb_tok is not None:
+                new_vision_pos_embed = torch.cat([pos_emb_tok, pos_emb_img],
+                                                 dim=0)
+            else:
+                new_vision_pos_embed = pos_emb_img
+
+            filtered_state_dict[
+                'vision_model.embeddings.position_embedding.weight'] = new_vision_pos_embed
+            not_loaded_save_state_dict.remove(
+                'vision_model.embeddings.position_embedding.weight')
+
+    # resize HuggingFace transformers text_model position_embedding with new input size
+    # for openai/clip-*, google/siglip-*, google/siglip2-* models
+    if 'text_model.embeddings.position_embedding.weight' in saved_state_dict.keys(
+    ) and 'text_model.embeddings.position_embedding.weight' in not_loaded_save_state_dict:
+        old_text_pos_embed = saved_state_dict[
+            'text_model.embeddings.position_embedding.weight']
+        new_text_pos_embed_shape = model.state_dict(
+        )['text_model.embeddings.position_embedding.weight'].shape
+
+        if old_text_pos_embed.shape != new_text_pos_embed_shape:
+            print('resize HuggingFace transformers text position_embedding!')
+            embed_dim = old_text_pos_embed.shape[1]
+            assert embed_dim == new_text_pos_embed_shape[
+                1], 'text position_embedding embed_dim changed!'
+
+            old_text_pos_embed = old_text_pos_embed.unsqueeze(0).permute(
+                0, 2, 1)
+            old_text_pos_embed = F.interpolate(
+                old_text_pos_embed,
+                size=new_text_pos_embed_shape[0],
+                mode='linear',
+                align_corners=False)
+            new_text_pos_embed = old_text_pos_embed.permute(0, 2, 1)[0]
+
+            filtered_state_dict[
+                'text_model.embeddings.position_embedding.weight'] = new_text_pos_embed
+            not_loaded_save_state_dict.remove(
+                'text_model.embeddings.position_embedding.weight')
+
     # resize clip text pos_embed layer with new input size (for clip.py models)
     if 'text.pos_embed' in saved_state_dict.keys(
     ) and 'text.pos_embed' in not_loaded_save_state_dict:

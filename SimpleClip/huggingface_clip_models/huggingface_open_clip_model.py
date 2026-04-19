@@ -317,7 +317,7 @@ if __name__ == '__main__':
     # cache_dir: HF_HOME dir +/hub
     net = HuggingFaceOpenClipModel(
         hf_model_name='laion/CLIP-ViT-B-16-laion2B-s34B-b88K',
-        cache_dir='/root/autodl-tmp/cache/hub',
+        cache_dir='/root/autodl-tmp/huggingface/hub',
         use_gradient_checkpoint=False)
     net = net.cuda()
     net.eval()

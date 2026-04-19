@@ -7,18 +7,19 @@ import numpy as np
 import nltk
 import random
 import string
-import tempfile
-import fsspec
 import regex
 
 from functools import partial
-from transformers import GemmaTokenizerFast, T5TokenizerFast
+import sentencepiece as spm
+from tokenizers import Tokenizer as HFTokenizer
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+_nltk_init = False
 
 
 def bytes_to_unicode():
@@ -188,8 +189,8 @@ def syntax_mask_tokenize(texts, context_length, sot_token_id, eot_token_id,
     global _nltk_init
     if not _nltk_init:
         # run them for the first time
-        nltk.download('punkt')
-        nltk.download('averaged_perceptron_tagger')
+        nltk.download('punkt_tab')
+        nltk.download('averaged_perceptron_tagger_eng')
         _nltk_init = True
 
     def get_order(x):
@@ -419,9 +420,9 @@ class SimpleTokenizer:
 
 class SigLipTokenizer:
     """
-    HuggingFace tokenizer wrapper for SigLIP T5 compatible sentencepiece vocabs
-    NOTE: this is not needed in normal library use, but is used to import new sentencepiece tokenizers
-    into OpenCLIP. Leaving code here in case future models use new tokenizers.
+    SentencePiece tokenizer wrapper for SigLIP T5 compatible sentencepiece vocabs.
+    Uses sentencepiece library directly to avoid compatibility issues with
+    transformers versions that changed GemmaTokenizerFast/T5TokenizerFast APIs.
     """
 
     def __init__(self, tokenizer_name, context_length=64):
@@ -440,32 +441,18 @@ class SigLipTokenizer:
             "/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/gemma_tokenizer.model",
         }
 
-        if 'gemma' in tokenizer_name:
-            tokenizer_cls = partial(GemmaTokenizerFast,
-                                    padding_side='right',
-                                    add_bos_token=False,
-                                    add_eos_token=True)
-        else:
-            tokenizer_cls = partial(T5TokenizerFast, extra_ids=0)
+        vocab_file = self.VOCAB_FILES[tokenizer_name]
+        self.sp_model = spm.SentencePieceProcessor()
+        self.sp_model.Load(vocab_file)
 
-        if tokenizer_name in self.VOCAB_FILES:
-            vocab_file = self.VOCAB_FILES[tokenizer_name]
-            with tempfile.NamedTemporaryFile('wb') as dst:
-                with fsspec.open(vocab_file, 'rb') as src:
-                    dst.write(src.read())
-                self.tokenizer = tokenizer_cls(dst.name, legacy=False)
-        else:
-            self.tokenizer = tokenizer_cls(tokenizer_name, legacy=False)
-
-        self.tokenizer.pad_token_id = 0 if 'gemma' in tokenizer_name else 1
-        self.tokenizer.eos_token_id = 1
+        self.pad_token_id = 0
+        self.eos_token_id = 1
         self.context_length = context_length
 
         print(f'context_length: {self.context_length}')
 
     def __call__(self, texts, context_length=None):
-        # same cleaning as for default tokenizer, except lowercasing
-        # adding lower (for case-sensitive tokenizers) will make it more robust but less sensitive to nuance
+        # canonicalize text: basic clean, remove whitespace, remove punctuation, lower case
         if isinstance(texts, str):
             texts = [texts]
 
@@ -473,11 +460,126 @@ class SigLipTokenizer:
         assert context_length, 'Please set a valid context length'
 
         texts = [canonicalize_text(basic_clean(text)) for text in texts]
-        output = self.tokenizer(texts,
-                                return_tensors='pt',
-                                max_length=context_length,
-                                padding='max_length',
-                                truncation=True)
-        tokens = output.input_ids
+
+        all_ids = []
+        for text in texts:
+            ids = self.sp_model.Encode(text)
+            # truncate if needed (reserve 1 slot for eos token)
+            if len(ids) > context_length - 1:
+                ids = ids[:context_length - 1]
+            # append eos token
+            ids = ids + [self.eos_token_id]
+            # pad to max_length
+            ids = ids + [self.pad_token_id] * (context_length - len(ids))
+            all_ids.append(ids)
+
+        tokens = torch.tensor(all_ids, dtype=torch.long)
+
+        return tokens
+
+
+class Qwen35Tokenizer:
+    """
+    BPE tokenizer wrapper for Qwen3.5 models.
+    Uses HuggingFace tokenizers library directly to load tokenizer.json file,
+    avoiding compatibility issues with transformers versions.
+    Qwen3.5 uses byte-level BPE tokenizer with vocab_size=248058.
+    """
+
+    def __init__(
+            self,
+            tokenizer_file='/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/Qwen3.5_tokenizer.json',
+            context_length=64):
+
+        self.tokenizer = HFTokenizer.from_file(tokenizer_file)
+        # disable any built-in truncation and padding from tokenizer.json
+        self.tokenizer.no_truncation()
+        self.tokenizer.no_padding()
+
+        # Qwen3.5 special token ids:
+        # <|endoftext|>: 248044, <|im_start|>: 248045, <|im_end|>: 248046
+        self.pad_token_id = 248044  # <|endoftext|>
+        self.eos_token_id = 248044  # <|endoftext|>
+        self.context_length = context_length
+
+        print(f'context_length: {self.context_length}')
+
+    def __call__(self, texts, context_length=None):
+        if isinstance(texts, str):
+            texts = [texts]
+
+        context_length = context_length or self.context_length
+        assert context_length, 'Please set a valid context length'
+
+        texts = [canonicalize_text(basic_clean(text)) for text in texts]
+
+        all_ids = []
+        for text in texts:
+            encoding = self.tokenizer.encode(text)
+            ids = encoding.ids
+            # truncate if needed (reserve 1 slot for eos token)
+            if len(ids) > context_length - 1:
+                ids = ids[:context_length - 1]
+            # append eos token
+            ids = ids + [self.eos_token_id]
+            # pad to context_length
+            ids = ids + [self.pad_token_id] * (context_length - len(ids))
+            all_ids.append(ids)
+
+        tokens = torch.tensor(all_ids, dtype=torch.long)
+
+        return tokens
+
+
+class DeepSeekV32Tokenizer:
+    """
+    BPE tokenizer wrapper for DeepSeek-V3.2 models.
+    Uses HuggingFace tokenizers library directly to load tokenizer.json file,
+    avoiding compatibility issues with transformers versions.
+    DeepSeek-V3.2 uses byte-level BPE tokenizer with 128000 base vocab tokens
+    plus special tokens.
+    """
+
+    def __init__(
+            self,
+            tokenizer_file='/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/DeepSeek-V3.2_tokenizer.json',
+            context_length=64):
+
+        self.tokenizer = HFTokenizer.from_file(tokenizer_file)
+        # disable any built-in truncation and padding from tokenizer.json
+        self.tokenizer.no_truncation()
+        self.tokenizer.no_padding()
+
+        # DeepSeek-V3.2 special token ids:
+        # <｜begin▁of▁sentence｜>: 0, <｜end▁of▁sentence｜>: 1, <｜▁pad▁｜>: 2
+        self.pad_token_id = 2  # <｜▁pad▁｜>
+        self.eos_token_id = 1  # <｜end▁of▁sentence｜>
+        self.context_length = context_length
+
+        print(f'context_length: {self.context_length}')
+
+    def __call__(self, texts, context_length=None):
+        if isinstance(texts, str):
+            texts = [texts]
+
+        context_length = context_length or self.context_length
+        assert context_length, 'Please set a valid context length'
+
+        texts = [canonicalize_text(basic_clean(text)) for text in texts]
+
+        all_ids = []
+        for text in texts:
+            encoding = self.tokenizer.encode(text)
+            ids = encoding.ids
+            # truncate if needed (reserve 1 slot for eos token)
+            if len(ids) > context_length - 1:
+                ids = ids[:context_length - 1]
+            # append eos token
+            ids = ids + [self.eos_token_id]
+            # pad to context_length
+            ids = ids + [self.pad_token_id] * (context_length - len(ids))
+            all_ids.append(ids)
+
+        tokens = torch.tensor(all_ids, dtype=torch.long)
 
         return tokens

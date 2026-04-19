@@ -21,7 +21,8 @@ class config:
 
     model = HuggingFaceClipModel(hf_model_name=network,
                                  pretrained=True,
-                                 local_files_only=False,
+                                 cache_dir='/root/autodl-tmp/huggingface/hub',
+                                 local_files_only=True,
                                  use_gradient_checkpoint=True)
 
     # load pretrained model or not

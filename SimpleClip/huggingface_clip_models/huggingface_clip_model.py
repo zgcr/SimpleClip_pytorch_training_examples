@@ -75,14 +75,15 @@ class HuggingFaceClipModel(nn.Module):
             hf_model_name,
             cache_dir=cache_dir,
             local_files_only=local_files_only,
-            use_fast=False)
+            backend="pil")
 
         if pretrained:
             self.model = AutoModel.from_pretrained(
                 hf_model_name,
                 config=self.config,
                 cache_dir=cache_dir,
-                local_files_only=local_files_only)
+                local_files_only=local_files_only,
+                use_safetensors=True)
         else:
             self.model = AutoModel.from_config(self.config)
 
@@ -91,13 +92,17 @@ class HuggingFaceClipModel(nn.Module):
                 self.model.gradient_checkpointing_enable()
                 print(f'using gradient checkpoint!')
             else:
-                if hasattr(self.model.visual, 'gradient_checkpointing_enable'):
-                    self.model.visual.gradient_checkpointing_enable()
+                if hasattr(self.model, 'vision_model') and hasattr(
+                        self.model.vision_model,
+                        'gradient_checkpointing_enable'):
+                    self.model.vision_model.gradient_checkpointing_enable()
                     print("Using gradient checkpoint for visual encoder")
 
-                if hasattr(self.model.text, 'gradient_checkpointing_enable'):
-                    self.model.text.gradient_checkpointing_enable()
-                    print("Using gradient checkpointi for text encoder")
+                if hasattr(self.model, 'text_model') and hasattr(
+                        self.model.text_model,
+                        'gradient_checkpointing_enable'):
+                    self.model.text_model.gradient_checkpointing_enable()
+                    print("Using gradient checkpoint for text encoder")
 
     def get_logit_scale(self):
         if hasattr(self.model, 'logit_scale'):
@@ -306,7 +311,7 @@ if __name__ == '__main__':
     # cache_dir: HF_HOME dir +/hub
     net = HuggingFaceClipModel(hf_model_name='openai/clip-vit-base-patch16',
                                pretrained=True,
-                               cache_dir='/root/autodl-tmp/cache/hub',
+                               cache_dir='/root/autodl-tmp/huggingface/hub',
                                local_files_only=True,
                                use_gradient_checkpoint=False)
     model = net.model

@@ -574,7 +574,8 @@ class GQACLIP(nn.Module):
         }
 
         if self.logit_bias is not None:
-            outputs['logit_bias'] = self.logit_bias
+            # for deepspeed=0.18.9 zero stage3, self.logit_bias must +0.
+            outputs['logit_bias'] = self.logit_bias + 0.
 
         return outputs
 
@@ -587,7 +588,7 @@ class GQACLIP(nn.Module):
 def vit_base_patch16_gqa_clip(image_size=224,
                               patch_size=16,
                               context_length=77,
-                              vocab_size=49408,
+                              vocab_size=248058,
                               **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -612,7 +613,7 @@ def vit_base_patch16_gqa_clip(image_size=224,
 def vit_large_patch16_gqa_clip(image_size=224,
                                patch_size=16,
                                context_length=77,
-                               vocab_size=49408,
+                               vocab_size=248058,
                                **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -637,7 +638,7 @@ def vit_large_patch16_gqa_clip(image_size=224,
 def vit_huge_patch16_gqa_clip(image_size=224,
                               patch_size=16,
                               context_length=77,
-                              vocab_size=49408,
+                              vocab_size=248058,
                               **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -662,7 +663,7 @@ def vit_huge_patch16_gqa_clip(image_size=224,
 def vit_1B_patch16_gqa_clip(image_size=224,
                             patch_size=16,
                             context_length=77,
-                            vocab_size=49408,
+                            vocab_size=248058,
                             **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -692,7 +693,7 @@ def vit_1B_patch16_gqa_clip(image_size=224,
 def vit_base_patch16_gqa_siglip(image_size=224,
                                 patch_size=16,
                                 context_length=64,
-                                vocab_size=256000,
+                                vocab_size=248058,
                                 **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -721,7 +722,7 @@ def vit_base_patch16_gqa_siglip(image_size=224,
 def vit_large_patch16_gqa_siglip(image_size=224,
                                  patch_size=16,
                                  context_length=64,
-                                 vocab_size=256000,
+                                 vocab_size=248058,
                                  **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -750,7 +751,7 @@ def vit_large_patch16_gqa_siglip(image_size=224,
 def vit_huge_patch16_gqa_siglip(image_size=224,
                                 patch_size=16,
                                 context_length=64,
-                                vocab_size=256000,
+                                vocab_size=248058,
                                 **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -779,7 +780,7 @@ def vit_huge_patch16_gqa_siglip(image_size=224,
 def vit_1B_patch16_gqa_siglip(image_size=224,
                               patch_size=16,
                               context_length=64,
-                              vocab_size=256000,
+                              vocab_size=248058,
                               **kwargs):
     return GQACLIP(image_size=image_size,
                    patch_size=patch_size,
@@ -827,13 +828,13 @@ if __name__ == '__main__':
     BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     sys.path.append(BASE_DIR)
 
-    from tokenizer import SimpleTokenizer, SigLipTokenizer
+    from tokenizer import Qwen35Tokenizer
 
     net = vit_base_patch16_gqa_clip()
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SimpleTokenizer(context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -858,7 +859,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SimpleTokenizer(context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -883,7 +884,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SimpleTokenizer(context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -908,7 +909,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SimpleTokenizer(context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -933,7 +934,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SimpleTokenizer(context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -959,7 +960,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SigLipTokenizer('gemma', context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -985,7 +986,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SigLipTokenizer('gemma', context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -1011,7 +1012,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SigLipTokenizer('gemma', context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()
@@ -1037,7 +1038,7 @@ if __name__ == '__main__':
     net = net.cuda()
     image_h, image_w = 224, 224
     images = torch.randn(1, 3, image_h, image_w).cuda()
-    tokenizer = SigLipTokenizer('gemma', context_length=net.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=net.context_length)
     texts = ['a dog']
     tokens = [tokenizer([str(per_image_text)])[0] for per_image_text in texts]
     tokens = torch.stack(tokens, dim=0).long()

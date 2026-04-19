@@ -19,8 +19,10 @@ import torchvision.transforms as transforms
 class config:
     network = 'timm/ViT-B-16-SigLIP2'
 
-    model = HuggingFaceOpenClipModel(hf_model_name=network,
-                                     use_gradient_checkpoint=True)
+    model = HuggingFaceOpenClipModel(
+        hf_model_name=network,
+        cache_dir='/root/autodl-tmp/huggingface/hub',
+        use_gradient_checkpoint=True)
 
     # load pretrained model or not
     trained_model_path = ''

@@ -23,7 +23,7 @@
 **2、(optional)Add HF_HOME dir HF_ENDPOINT dir in .bashrc and .zshrc:**
 ```
 # Add HF_HOME dir and HF_ENDPOINT dir in .bashrc and .zshrc files:
-export HF_HOME=/root/autodl-tmp/cache
+export HF_HOME=/root/autodl-tmp/huggingface
 export HF_ENDPOINT=https://hf-mirror.com
 ```
 ```

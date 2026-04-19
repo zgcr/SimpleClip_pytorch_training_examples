@@ -8,7 +8,7 @@ sys.path.append(BASE_DIR)
 from tools.path import image_caption_pair_dataset_path
 
 from SimpleClip.models import clip
-from SimpleClip.models.tokenizer import SigLipTokenizer
+from SimpleClip.models.tokenizer import Qwen35Tokenizer
 from SimpleClip.losses import SigLipLoss
 from SimpleClip.datasets.cc3m_dataset import CC3MDataset
 from SimpleClip.common import Opencv2PIL, TorchRandomResizedCrop, TorchMeanStdNormalize, ImageCaptionPairCollater, load_state_dict
@@ -31,7 +31,7 @@ class config:
     trained_model_path = ''
     load_state_dict(trained_model_path, model)
 
-    tokenizer = SigLipTokenizer('gemma', context_length=model.context_length)
+    tokenizer = Qwen35Tokenizer(context_length=model.context_length)
 
     use_siglip_loss = True
     train_criterion = SigLipLoss(dist_type='bidir')

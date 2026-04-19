@@ -512,7 +512,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                 # DeepSpeed backward + step for each micro-batch.
                 # DeepSpeed internally delays allreduce and optimizer step
                 # until the accumulation boundary (last micro-batch).
-                model.backward(loss)
+                model.backward(loss, scale_wrt_gas=False)
                 model.step()
 
         # reset accumulation buffers
@@ -1419,6 +1419,9 @@ def test_huggingface_clip_model(test_loader, model, config):
                 batch_features = model.module.model.get_text_features(
                     **batch_text_inputs)
 
+            if not isinstance(batch_features, torch.Tensor):
+                batch_features = batch_features.pooler_output
+
             text_features.append(batch_features)
 
     text_features = torch.cat(text_features, dim=0)
@@ -1444,6 +1447,9 @@ def test_huggingface_clip_model(test_loader, model, config):
             else:
                 image_features = model.module.model.get_image_features(
                     pixel_values=pixel_values)
+
+            if not isinstance(image_features, torch.Tensor):
+                image_features = image_features.pooler_output
 
             image_features = F.normalize(image_features, dim=-1)
 

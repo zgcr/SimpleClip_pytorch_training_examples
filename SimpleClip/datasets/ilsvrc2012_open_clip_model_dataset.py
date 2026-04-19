@@ -142,7 +142,7 @@ if __name__ == '__main__':
     net = HuggingFaceOpenClipModel(
         hf_model_name='laion/CLIP-ViT-B-16-laion2B-s34B-b88K',
         use_gradient_checkpoint=False)
-    val_processor = net.train_preprocess
+    val_processor = net.val_preprocess
 
     ilsvrc2012traindataset = ILSVRC2012Dataset(
         root_dir=ILSVRC2012_path,

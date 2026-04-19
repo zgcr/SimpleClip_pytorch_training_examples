@@ -45,8 +45,13 @@ def build_param_groups(config, model):
                 continue
             all_params.append(param)
             # DeepSpeed 0.18.9 engine.py requires `param.use_muon`
-            # attribute on every parameter. Set it based on ndim >= 2.
-            if param.ndim >= 2:
+            # attribute on every parameter. Must match the logic in
+            # deepspeed.set_optimizer_flags() (called inside
+            # deepspeed.initialize()) which excludes params whose name
+            # contains "embed" or "lm_head".
+            if param.ndim >= 2 and not any(
+                    keyword in name.lower()
+                    for keyword in ("embed", "lm_head")):
                 param.use_muon = True
                 muon_param_names.append(name)
             else:
@@ -433,15 +438,6 @@ def build_deepspeed_config(config):
         ds_config["zero_optimization"][
             "stage3_gather_16bit_weights_on_model_save"] = True
 
-    ds_config["flops_profiler"] = {
-        "enabled": True,
-        "profile_step": 1,  # 在第1个step进行profiling
-        "module_depth": -1,  # -1表示打印所有层级
-        "top_modules": 3,  # 打印top 3模块
-        "detailed": True,  # 打印详细信息
-        "output_file": None,  # None表示输出到DeepSpeed log(终端/日志)
-    }
-
     # Optimizer (let DeepSpeed create the optimizer natively for ZeRO
     # compatibility, especially for Muon which requires native support
     # under ZeRO stage 1/2/3).
@@ -692,10 +688,7 @@ def main():
 
     # deepspeed==0.18.9
     # DeepSpeed默认会将loss除以gradient_accumulation_steps,但CLIP的gradient caching
-    # 方法中每次backward得到的梯度本身就是完整梯度的一部分,K次backward之和天然等于完整梯度,
-    # 不需要额外的除法。设置_scale_wrt_gas=False禁用DeepSpeed的自动loss缩放。
-    if config.accumulation_steps > 1:
-        model_engine._scale_wrt_gas = False
+    # 方法中每次backward得到的梯度本身就是完整梯度的一部分,K次backward之和天然等于完整梯度, 不需要额外的除法。loss backward时设置_scale_wrt_gas=False禁用DeepSpeed的自动loss缩放。
 
     start_epoch, train_time = 1, 0
     best_loss, train_loss = 1e9, 0
