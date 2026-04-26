@@ -152,7 +152,7 @@ def random_mask_tokenize(texts,
             indices = torch.randperm(len(tokens))
             indices = indices[:num_keep]
             if not shuffle:
-                indices = indices.msort()
+                indices = torch.sort(indices).values
             tokens = tokens[indices]
             num_tokens = num_keep
         result[i, 0] = sot_token_id
@@ -174,7 +174,7 @@ def simple_mask_tokenize(texts, context_length, sot_token_id, eot_token_id,
             num_keep = context_length - 2
             # high is incl
             start_index = random.randint(0, num_tokens - num_keep)
-            tokens = tokens[start_index:start_index + num_keep]
+            tokens = list(tokens[start_index:start_index + num_keep])
         tokens = [sot_token_id] + tokens + [eot_token_id]
         result[i, :len(tokens)] = torch.tensor(tokens)
 
@@ -498,7 +498,7 @@ class Qwen35Tokenizer:
 
         # Qwen3.5 special token ids:
         # <|endoftext|>: 248044, <|im_start|>: 248045, <|im_end|>: 248046
-        self.pad_token_id = 248044  # <|endoftext|>
+        self.pad_token_id = 0
         self.eos_token_id = 248044  # <|endoftext|>
         self.context_length = context_length
 
@@ -531,18 +531,25 @@ class Qwen35Tokenizer:
         return tokens
 
 
-class DeepSeekV32Tokenizer:
+class DeepSeekV4Tokenizer:
     """
-    BPE tokenizer wrapper for DeepSeek-V3.2 models.
+    BPE tokenizer wrapper for DeepSeek-V4 models.
     Uses HuggingFace tokenizers library directly to load tokenizer.json file,
     avoiding compatibility issues with transformers versions.
-    DeepSeek-V3.2 uses byte-level BPE tokenizer with 128000 base vocab tokens
+    DeepSeek-V4 uses byte-level BPE tokenizer with 128000 base vocab tokens
     plus special tokens.
+
+    NOTE: eos_token_id=1 is very small compared to regular BPE token ids
+    (range ~3-128000+), so this tokenizer is NOT compatible with
+    pool_type='argmax' (used by CLIP models). It should only be used with
+    pool_type='last' (used by SigLIP models), where the pooling position
+    is determined by (text != pad_id).sum() - 1.
+    When using this tokenizer, make sure to set text_pad_id=2 in the model.
     """
 
     def __init__(
             self,
-            tokenizer_file='/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/DeepSeek-V3.2_tokenizer.json',
+            tokenizer_file='/root/code/SimpleClip_pytorch_training_examples/SimpleClip/models/DeepSeek-V4_tokenizer.json',
             context_length=64):
 
         self.tokenizer = HFTokenizer.from_file(tokenizer_file)
@@ -550,7 +557,7 @@ class DeepSeekV32Tokenizer:
         self.tokenizer.no_truncation()
         self.tokenizer.no_padding()
 
-        # DeepSeek-V3.2 special token ids:
+        # DeepSeek-V4 special token ids:
         # <｜begin▁of▁sentence｜>: 0, <｜end▁of▁sentence｜>: 1, <｜▁pad▁｜>: 2
         self.pad_token_id = 2  # <｜▁pad▁｜>
         self.eos_token_id = 1  # <｜end▁of▁sentence｜>
