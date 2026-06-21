@@ -574,7 +574,7 @@ class GQACLIP(nn.Module):
         }
 
         if self.logit_bias is not None:
-            # for deepspeed=0.18.9 zero stage3, self.logit_bias must +0.
+            # for deepspeed=0.19.2 zero stage3, self.logit_bias must +0.
             outputs['logit_bias'] = self.logit_bias + 0.
 
         return outputs

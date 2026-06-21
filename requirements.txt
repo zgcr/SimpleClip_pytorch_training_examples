@@ -16,4 +16,4 @@ open_clip_torch==3.3.0
 timm==1.0.22
 transformers==5.5.0
 tokenizers==0.22.2
-deepspeed==0.18.9
+deepspeed==0.19.2

@@ -295,6 +295,9 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
             optimizer.step()
             optimizer.zero_grad()
 
+        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+            config.ema_model.update(model)
+
         # reset
         if config.accumulation_steps > 1:
             accumulation_images = []
@@ -340,7 +343,11 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if config.use_compile:
+                    if hasattr(config,
+                               'use_ema_model') and config.use_ema_model:
+                        save_model = config.ema_model.ema_model.module.state_dict(
+                        )
+                    elif config.use_compile:
                         save_model = model._orig_mod.module.state_dict()
                     else:
                         save_model = model.module.state_dict()
@@ -515,6 +522,11 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                 model.backward(loss, scale_wrt_gas=False)
                 model.step()
 
+        # Update EMA model after optimizer step (unified for both
+        # accumulation_steps==1 and accumulation_steps>1 cases).
+        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+            config.ema_model.update(model, config)
+
         # reset accumulation buffers
         if config.accumulation_steps > 1:
             accumulation_images = []
@@ -566,30 +578,40 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
         if hasattr(config,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
-                if config.use_compile:
-                    module = model.module._orig_mod
-                else:
-                    module = model.module
-
                 save_path = os.path.join(
                     config.checkpoint_dir,
                     f'step_{total_accumulation_iters}.pth')
 
-                if config.deepspeed_zero_stage == 3:
-                    # Batch gather all parameters at once to reduce
-                    # communication rounds under ZeRO-3
-                    all_params = list(module.parameters())
-                    with deepspeed.zero.GatheredParameters(all_params):
-                        if local_rank == 0 and total_rank == 0:
-                            state_dict = {
-                                k: v.cpu().clone()
-                                for k, v in module.state_dict().items()
-                            }
+                if config.use_ema_model:
+                    # EMA enabled: only save EMA model
+                    # For ZeRO-3, get_ema_model_state_dict uses all_gather
+                    # (collective op), so all ranks must call it.
+                    save_model = config.ema_model.get_ema_model_state_dict(
+                        model, config)
                     if local_rank == 0 and total_rank == 0:
-                        torch.save(state_dict, save_path)
+                        torch.save(save_model, save_path)
                 else:
-                    if local_rank == 0 and total_rank == 0:
-                        torch.save(module.state_dict(), save_path)
+                    # EMA disabled: save training model
+                    if config.use_compile:
+                        module = model.module._orig_mod
+                    else:
+                        module = model.module
+
+                    if config.deepspeed_zero_stage == 3:
+                        # Batch gather all parameters at once to reduce
+                        # communication rounds under ZeRO-3
+                        all_params = list(module.parameters())
+                        with deepspeed.zero.GatheredParameters(all_params):
+                            if local_rank == 0 and total_rank == 0:
+                                state_dict = {
+                                    k: v.cpu().clone()
+                                    for k, v in module.state_dict().items()
+                                }
+                        if local_rank == 0 and total_rank == 0:
+                            torch.save(state_dict, save_path)
+                    else:
+                        if local_rank == 0 and total_rank == 0:
+                            torch.save(module.state_dict(), save_path)
 
         iter_index += 1
 
@@ -861,6 +883,9 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
             optimizer.step()
             optimizer.zero_grad()
 
+        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+            config.ema_model.update(model)
+
         # reset
         if config.accumulation_steps > 1:
             accumulation_images = []
@@ -907,7 +932,11 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if config.use_compile:
+                    if hasattr(config,
+                               'use_ema_model') and config.use_ema_model:
+                        save_model = config.ema_model.ema_model.module.model.state_dict(
+                        )
+                    elif config.use_compile:
                         save_model = model._orig_mod.module.model.state_dict()
                     else:
                         save_model = model.module.model.state_dict()
@@ -1177,6 +1206,9 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             optimizer.step()
             optimizer.zero_grad()
 
+        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+            config.ema_model.update(model)
+
         # reset
         if config.accumulation_steps > 1:
             accumulation_inputs = []
@@ -1222,7 +1254,11 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if config.use_compile:
+                    if hasattr(config,
+                               'use_ema_model') and config.use_ema_model:
+                        save_model = config.ema_model.ema_model.module.model.state_dict(
+                        )
+                    elif config.use_compile:
                         save_model = model._orig_mod.module.model.state_dict()
                     else:
                         save_model = model.module.model.state_dict()

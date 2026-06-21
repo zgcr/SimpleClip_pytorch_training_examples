@@ -4,4 +4,3 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun \
     --master_port 10000 \
     ../../tools/train_multi_node_nas.py \
     --work-dir ./
-

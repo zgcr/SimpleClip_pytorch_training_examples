@@ -102,3 +102,7 @@ class config:
     deepspeed_zero_stage = 3
     # ZeRO-Offload: offload optimizer states (and params for stage 3) to CPU
     deepspeed_offload = False
+
+    use_ema_model = False
+    ema_model_decay = 0.9999
+    ema_model_tau = 2000

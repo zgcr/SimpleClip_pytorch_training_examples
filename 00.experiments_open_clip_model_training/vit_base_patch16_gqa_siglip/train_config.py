@@ -100,3 +100,7 @@ class config:
         # 'max-autotune': optimizes to produce the fastest model, but takes a very long time to compile and may failed.
         'mode': 'default',
     }
+
+    use_ema_model = False
+    ema_model_decay = 0.9999
+    ema_model_tau = 2000

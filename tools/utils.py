@@ -12,7 +12,6 @@ import logging.handlers
 import copy
 import math
 import numpy as np
-import os
 import random
 import time
 
@@ -24,7 +23,7 @@ import torch.backends.cudnn as cudnn
 
 from torch.amp.grad_scaler import GradScaler
 
-from tools.muon_optimizer import Muon
+from tools.muon_optimizer import MuonAdamW, MuonSGD
 
 
 def parse_args_example():
@@ -158,20 +157,169 @@ class EmaModel(nn.Module):
     relative to your update count per epoch.
     """
 
-    def __init__(self, model, decay=0.9999):
+    def __init__(self, model, decay=0.9999, tau=2000, updates=0):
         super(EmaModel, self).__init__()
         # make a copy of the model for accumulating moving average of weights
         self.ema_model = copy.deepcopy(model)
         self.ema_model.eval()
-        self.decay = decay
-        self.update_fn = lambda e, m: self.decay * e + (1. - self.decay) * m
+        self.updates = updates
+        self.decay = lambda x: decay * (1 - math.exp(-x / tau))
 
     def update(self, model):
         with torch.no_grad():
+            self.updates += 1
+            d = self.decay(self.updates)
             for ema_v, model_v in zip(self.ema_model.state_dict().values(),
                                       model.state_dict().values()):
                 assert ema_v.shape == model_v.shape, 'wrong ema model!'
-                ema_v.copy_(self.update_fn(ema_v, model_v))
+                if ema_v.dtype.is_floating_point:
+                    ema_v *= d
+                    ema_v += (1 - d) * model_v.detach()
+                else:
+                    ema_v.copy_(model_v.detach())
+
+
+class DeepSpeedEmaModel:
+    """EMA model for DeepSpeed, compatible with ZeRO stage 0/1/2/3.
+
+    - ZeRO 0/1/2: each rank holds full model parameters, so EMA stores a
+      full-size state_dict on GPU as a plain dict (not managed by DeepSpeed).
+    - ZeRO 3: each rank only holds 1/N parameter shards. EMA stores only
+      the local shard for each parameter (via param.ds_tensor), so there is
+      NO extra communication and NO CPU<->GPU transfer during update.
+
+    EMA update formula:
+      ema_weights = decay * ema_weights + (1 - decay) * model_weights
+    where decay = base_decay * (1 - exp(-updates / tau)).
+    """
+
+    def __init__(self,
+                 model_engine,
+                 config,
+                 decay=0.9999,
+                 tau=2000,
+                 updates=0):
+        self.zero_stage = config.deepspeed_zero_stage
+        self.use_compile = config.use_compile
+        self.updates = updates
+        self._decay = decay
+        self._tau = tau
+
+        module = model_engine.module._orig_mod if self.use_compile else model_engine.module
+
+        if self.zero_stage == 3:
+            # ZeRO-3: store EMA of each parameter's local shard
+            self.ema_params = {}
+            for name, param in module.named_parameters():
+                # param.ds_tensor is the local shard held by this rank
+                self.ema_params[name] = param.ds_tensor.detach().clone().float(
+                )
+        else:
+            # ZeRO-0/1/2: store full state_dict as EMA
+            self.ema_state_dict = {
+                k: v.detach().clone().float()
+                for k, v in module.state_dict().items()
+            }
+
+    def _get_decay(self):
+        return self._decay * (1 - math.exp(-self.updates / self._tau))
+
+    @torch.no_grad()
+    def update(self, model_engine, config):
+        """Update EMA weights after optimizer step. No communication needed."""
+        self.updates += 1
+        d = self._get_decay()
+
+        module = model_engine.module._orig_mod if self.use_compile else model_engine.module
+
+        if self.zero_stage == 3:
+            for name, param in module.named_parameters():
+                ema_v = self.ema_params[name]
+                local_data = param.ds_tensor
+                if ema_v.dtype.is_floating_point:
+                    ema_v.mul_(d).add_((1 - d) * local_data.detach().float())
+                else:
+                    ema_v.copy_(local_data.detach())
+        else:
+            model_sd = module.state_dict()
+            for k, ema_v in self.ema_state_dict.items():
+                model_v = model_sd[k]
+                if ema_v.dtype.is_floating_point:
+                    ema_v.mul_(d).add_((1 - d) * model_v.detach().float())
+                else:
+                    ema_v.copy_(model_v.detach())
+
+    @torch.no_grad()
+    def get_ema_model_state_dict(self, model_engine, config):
+        """Get full EMA state_dict for saving.
+        For ZeRO-3, all ranks must call this (all_gather is collective),
+        but only rank 0 should save the returned dict.
+        For ZeRO-0/1/2, returns the full EMA state_dict directly.
+        """
+        module = model_engine.module._orig_mod if self.use_compile else model_engine.module
+
+        if self.zero_stage == 3:
+            import deepspeed
+            ema_full_state_dict = {}
+            world_size = torch.distributed.get_world_size()
+
+            for name, param in module.named_parameters():
+                ema_local = self.ema_params[name]
+                # all_gather local EMA shards from all ranks
+                gathered = [
+                    torch.zeros_like(ema_local) for _ in range(world_size)
+                ]
+                torch.distributed.all_gather(gathered, ema_local)
+                full_param = torch.cat(gathered, dim=0)
+                # ZeRO-3 pads shards to equal size; truncate to original numel
+                ema_full_state_dict[
+                    name] = full_param[:param.ds_numel].reshape(
+                        param.ds_shape).cpu().clone()
+
+            # Also include non-parameter buffers from the model
+            param_names = set(name for name, _ in module.named_parameters())
+            for k, v in module.state_dict().items():
+                if k not in param_names:
+                    # Buffers are replicated across ranks, just copy
+                    with deepspeed.zero.GatheredParameters([],
+                                                           modifier_rank=0):
+                        ema_full_state_dict[k] = v.detach().cpu().clone()
+
+            return ema_full_state_dict
+        else:
+            return {k: v.cpu().clone() for k, v in self.ema_state_dict.items()}
+
+    def state_dict(self):
+        """Serialize EMA state for checkpoint resume."""
+        state = {
+            'updates': self.updates,
+            'decay': self._decay,
+            'tau': self._tau,
+        }
+        if self.zero_stage == 3:
+            state['ema_params'] = {
+                k: v.cpu().clone()
+                for k, v in self.ema_params.items()
+            }
+        else:
+            state['ema_state_dict'] = {
+                k: v.cpu().clone()
+                for k, v in self.ema_state_dict.items()
+            }
+        return state
+
+    def load_state_dict(self, state):
+        """Restore EMA state from checkpoint."""
+        self.updates = state['updates']
+        if self.zero_stage == 3:
+            for k, v in state['ema_params'].items():
+                if k in self.ema_params:
+                    self.ema_params[k].copy_(v.to(self.ema_params[k].device))
+        else:
+            for k, v in state['ema_state_dict'].items():
+                if k in self.ema_state_dict:
+                    self.ema_state_dict[k].copy_(
+                        v.to(self.ema_state_dict[k].device))
 
 
 def build_training_mode(config, model):
@@ -186,7 +334,9 @@ def build_training_mode(config, model):
 
     local_rank = config.local_rank
     if hasattr(config, 'use_ema_model') and config.use_ema_model:
-        ema_model = EmaModel(model, decay=config.ema_model_decay)
+        ema_model = EmaModel(model,
+                             decay=config.ema_model_decay,
+                             tau=config.ema_model_tau)
         ema_model.ema_model = nn.parallel.DistributedDataParallel(
             ema_model.ema_model,
             device_ids=[local_rank],
@@ -294,7 +444,8 @@ class Scheduler:
 def build_optimizer(config, model):
     optimizer_name = config.optimizer[0]
     optimizer_parameters = config.optimizer[1]
-    assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
+    assert optimizer_name in ['SGD', 'AdamW', 'MuonAdamW',
+                              'MuonSGD'], 'Unsupported optimizer!'
 
     lr = optimizer_parameters['lr']
     weight_decay = optimizer_parameters['weight_decay']
@@ -582,7 +733,8 @@ def build_optimizer(config, model):
             model_layer_weight_decay_list)
 
     if optimizer_name == 'SGD':
-        momentum = optimizer_parameters['momentum']
+        momentum = 0.9 if 'momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['momentum']
         nesterov = False if 'nesterov' not in optimizer_parameters.keys(
         ) else optimizer_parameters['nesterov']
         return torch.optim.SGD(
@@ -590,6 +742,86 @@ def build_optimizer(config, model):
             lr=lr,
             momentum=momentum,
             nesterov=nesterov), model_layer_weight_decay_list
+
+    elif optimizer_name == 'MuonSGD':
+        # Note: MuonSGD uses unified lr and wd for all parameters.
+        # Per-layer lr/wd settings from optimizer_parameters are not applied.
+        # MuonSGD optimizer don't support global_weight_decay
+        # MuonSGD optimizer don't support no_weight_decay_layer_name_list
+        # MuonSGD optimizer don't support sub_layer_lr/sub_layer_weight_decay
+        # MuonSGD optimizer don't support lr_layer_decay
+
+        exclude_muon_layer_name_list = [
+            'position_encoding',
+            'cls_token',
+            'patch_embedding',
+        ]
+        if 'exclude_muon_layer_name_list' in optimizer_parameters.keys(
+        ) and isinstance(optimizer_parameters['exclude_muon_layer_name_list'],
+                         list):
+            exclude_muon_layer_name_list = exclude_muon_layer_name_list + optimizer_parameters[
+                'exclude_muon_layer_name_list']
+
+        # Separate parameters into muon_params and sgd_params
+        muon_param_list, muon_param_names = [], []
+        sgd_param_list, sgd_param_names = [], []
+        for name, param in model.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # Muon is used for 2D parameters that are not in exclude list
+            use_muon = (
+                param.ndim >= 2
+                and not any(exclude_name in name
+                            for exclude_name in exclude_muon_layer_name_list))
+
+            if use_muon:
+                muon_param_list.append(param)
+                muon_param_names.append(name)
+            else:
+                sgd_param_list.append(param)
+                sgd_param_names.append(name)
+
+        # Create summary for model_layer_weight_decay_list
+        model_layer_weight_decay_list = []
+        if len(muon_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': muon_param_names,
+                'optimizer': 'MuonSGD(Muon)',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+        if len(sgd_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': sgd_param_names,
+                'optimizer': 'MuonSGD(SGD)',
+                'lr': lr,
+                'weight_decay': weight_decay,
+            })
+
+        momentum = 0.95 if 'momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['momentum']
+        nesterov = True if 'nesterov' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['nesterov']
+        ns_steps = 5 if 'ns_steps' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['ns_steps']
+
+        sgd_momentum = 0.9 if 'sgd_momentum' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['sgd_momentum']
+        sgd_nesterov = False if 'sgd_nesterov' not in optimizer_parameters.keys(
+        ) else optimizer_parameters['sgd_nesterov']
+
+        return MuonSGD(
+            lr=lr,
+            wd=weight_decay,
+            muon_params=muon_param_list,
+            sgd_params=sgd_param_list,
+            momentum=momentum,
+            nesterov=nesterov,
+            ns_steps=ns_steps,
+            sgd_momentum=sgd_momentum,
+            sgd_nesterov=sgd_nesterov), model_layer_weight_decay_list
+
     elif optimizer_name == 'AdamW':
         beta1 = 0.9 if 'beta1' not in optimizer_parameters.keys(
         ) else optimizer_parameters['beta1']
@@ -601,13 +833,14 @@ def build_optimizer(config, model):
                                  lr=lr,
                                  betas=(beta1, beta2),
                                  eps=eps), model_layer_weight_decay_list
-    elif optimizer_name == 'Muon':
-        # Note: Muon uses unified lr and wd for all parameters.
+
+    elif optimizer_name == 'MuonAdamW':
+        # Note: MuonAdamW uses unified lr and wd for all parameters.
         # Per-layer lr/wd settings from optimizer_parameters are not applied.
-        # Muon optimizer don't support global_weight_decay
-        # Muon optimizer don't support no_weight_decay_layer_name_list
-        # Muon optimizer don't support sub_layer_lr/sub_layer_weight_decay
-        # Muon optimizer don't support lr_layer_decay
+        # MuonAdamW optimizer don't support global_weight_decay
+        # MuonAdamW optimizer don't support no_weight_decay_layer_name_list
+        # MuonAdamW optimizer don't support sub_layer_lr/sub_layer_weight_decay
+        # MuonAdamW optimizer don't support lr_layer_decay
 
         exclude_muon_layer_name_list = [
             'position_encoding',
@@ -645,14 +878,14 @@ def build_optimizer(config, model):
         if len(muon_param_names) > 0:
             model_layer_weight_decay_list.append({
                 'name': muon_param_names,
-                'optimizer': 'Muon',
+                'optimizer': 'MuonAdamW(Muon)',
                 'lr': lr,
                 'weight_decay': weight_decay,
             })
         if len(adamw_param_names) > 0:
             model_layer_weight_decay_list.append({
                 'name': adamw_param_names,
-                'optimizer': 'AdamW',
+                'optimizer': 'MuonAdamW(AdamW)',
                 'lr': lr,
                 'weight_decay': weight_decay,
             })
@@ -671,12 +904,12 @@ def build_optimizer(config, model):
         adamw_eps = 1e-08 if 'adamw_eps' not in optimizer_parameters.keys(
         ) else optimizer_parameters['adamw_eps']
 
-        return Muon(lr=lr,
-                    wd=weight_decay,
-                    muon_params=muon_param_list,
-                    adamw_params=adamw_param_list,
-                    momentum=momentum,
-                    nesterov=nesterov,
-                    ns_steps=ns_steps,
-                    adamw_betas=(adamw_beta1, adamw_beta2),
-                    adamw_eps=adamw_eps), model_layer_weight_decay_list
+        return MuonAdamW(lr=lr,
+                         wd=weight_decay,
+                         muon_params=muon_param_list,
+                         adamw_params=adamw_param_list,
+                         momentum=momentum,
+                         nesterov=nesterov,
+                         ns_steps=ns_steps,
+                         adamw_betas=(adamw_beta1, adamw_beta2),
+                         adamw_eps=adamw_eps), model_layer_weight_decay_list

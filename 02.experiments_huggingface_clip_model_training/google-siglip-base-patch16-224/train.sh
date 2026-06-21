@@ -5,3 +5,4 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 torchrun \
     ../../tools/train_huggingface_clip_model_multi_node_nas.py \
     --work-dir ./
 
+

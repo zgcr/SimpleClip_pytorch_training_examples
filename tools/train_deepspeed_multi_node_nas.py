@@ -16,7 +16,8 @@ import deepspeed
 from torch.utils.data import DataLoader
 
 from tools.scripts import train_clip_model_deepspeed
-from tools.utils import (get_logger, set_seed, worker_seed_init_fn, Scheduler)
+from tools.utils import (get_logger, set_seed, worker_seed_init_fn, Scheduler,
+                         DeepSpeedEmaModel)
 
 
 def build_param_groups(config, model):
@@ -32,7 +33,7 @@ def build_param_groups(config, model):
     lr = optimizer_parameters['lr']
     weight_decay = optimizer_parameters['weight_decay']
 
-    # For Muon, DeepSpeed 0.18.9 native implementation requires each
+    # For Muon, DeepSpeed 0.19.2 native implementation requires each
     # parameter to have a `use_muon` attribute (True/False) so that
     # the engine can split params into Muon group (ndim>=2) and
     # AdamW fallback group (ndim<2).
@@ -44,7 +45,7 @@ def build_param_groups(config, model):
             if not param.requires_grad:
                 continue
             all_params.append(param)
-            # DeepSpeed 0.18.9 engine.py requires `param.use_muon`
+            # DeepSpeed 0.19.2 engine.py requires `param.use_muon`
             # attribute on every parameter. Must match the logic in
             # deepspeed.set_optimizer_flags() (called inside
             # deepspeed.initialize()) which excludes params whose name
@@ -445,7 +446,7 @@ def build_deepspeed_config(config):
     optimizer_parameters = config.optimizer[1]
     assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
 
-    # for deepspeed==0.18.9, muon optimizer for zero stage3, reduce_scatter must be false, use allreduce instead
+    # for deepspeed==0.19.2, muon optimizer for zero stage3, reduce_scatter must be false, use allreduce instead
     if optimizer_name == 'Muon' and config.deepspeed_zero_stage == 3:
         ds_config["zero_optimization"]["reduce_scatter"] = False
 
@@ -476,12 +477,16 @@ def build_deepspeed_config(config):
             }
         }
     elif optimizer_name == 'Muon':
-        # DeepSpeed 0.18.9 engine.py _configure_basic_optimizer() only
+        # DeepSpeed 0.19.2 engine.py _configure_basic_optimizer() only
         # recognizes these keys for Muon param groups:
-        #   muon group:  ["lr", "momentum", "weight_decay", "muon_lr"]
+        #   muon group:  ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]
         #   adamw group: ["lr", "betas", "eps", "weight_decay", "adam_lr"]
         # Keys like "wd", "nesterov", "ns_steps", "adamw_betas", "adamw_eps"
         # are NOT recognized and will be silently ignored.
+        # ns_method: Newton-Schulz orthogonalization method.
+        #   "gram"     -> Gram Newton-Schulz (default), ~2x faster on rectangular
+        #                 matrices, uses fp16.
+        #   "standard" -> original Newton-Schulz quintic iteration, uses bf16.
         ds_config["optimizer"] = {
             "type": "Muon",
             "params": {
@@ -491,6 +496,8 @@ def build_deepspeed_config(config):
                 optimizer_parameters['weight_decay'],
                 "momentum":
                 optimizer_parameters.get('momentum', 0.95),
+                "ns_method":
+                optimizer_parameters.get('ns_method', 'gram'),
                 "betas": [
                     optimizer_parameters.get('adamw_beta1', 0.9),
                     optimizer_parameters.get('adamw_beta2', 0.999)
@@ -686,7 +693,19 @@ def main():
     # wrapper correctly exposes and delegates to the underlying optimizer.
     scheduler = Scheduler(config, optimizer)
 
-    # deepspeed==0.18.9
+    # Create EMA model after deepspeed.initialize().
+    # For ZeRO-3, param.ds_tensor (local shard) is only available after init.
+    # For ZeRO-0/1/2, params are still full after init.
+    if config.use_ema_model:
+        ema_model = DeepSpeedEmaModel(model_engine,
+                                      config,
+                                      decay=config.ema_model_decay,
+                                      tau=config.ema_model_tau)
+        config.ema_model = ema_model
+        log_info = f'EMA model created with decay={config.ema_model_decay}, tau={config.ema_model_tau}, zero_stage={config.deepspeed_zero_stage}'
+        logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
+
+    # deepspeed==0.19.2
     # DeepSpeed默认会将loss除以gradient_accumulation_steps,但CLIP的gradient caching
     # 方法中每次backward得到的梯度本身就是完整梯度的一部分,K次backward之和天然等于完整梯度, 不需要额外的除法。loss backward时设置_scale_wrt_gas=False禁用DeepSpeed的自动loss缩放。
 
@@ -704,6 +723,11 @@ def main():
             best_loss = client_state['best_loss']
             train_loss = client_state['train_loss']
             scheduler.load_state_dict(client_state['scheduler_state_dict'])
+
+            if config.use_ema_model:
+                if 'ema_model_state' in client_state:
+                    config.ema_model.load_state_dict(
+                        client_state['ema_model_state'])
 
             log_info = f'resuming model from {resume_model}. resume_epoch: {saved_epoch:0>3d}, used_time: {used_time:.3f} hours, best_loss: {best_loss:.4f}, lr: {scheduler.current_lr:.6f}'
             logger.info(
@@ -742,10 +766,13 @@ def main():
         need_save_best = is_best
 
         if need_save_epoch or need_save_best:
-            if config.deepspeed_zero_stage == 3:
-                # ZeRO-3: all ranks must participate in GatheredParameters
-                save_model = get_model_state_dict(model_engine, config)
-                if local_rank == 0 and total_rank == 0 and save_model is not None:
+            if config.use_ema_model:
+                # EMA enabled: only save EMA model, skip training model
+                # For ZeRO-3, get_ema_model_state_dict uses all_gather
+                # (collective op), so all ranks must call it.
+                save_model = config.ema_model.get_ema_model_state_dict(
+                    model_engine, config)
+                if local_rank == 0 and total_rank == 0:
                     if need_save_epoch:
                         torch.save(
                             save_model,
@@ -754,16 +781,33 @@ def main():
                         torch.save(save_model,
                                    os.path.join(checkpoint_dir, 'best.pth'))
             else:
-                # ZeRO-0/1/2: only global rank 0 needs to call state_dict
-                if local_rank == 0 and total_rank == 0:
+                # EMA disabled: save training model
+                if config.deepspeed_zero_stage == 3:
+                    # ZeRO-3: all ranks must participate in GatheredParameters
                     save_model = get_model_state_dict(model_engine, config)
-                    if need_save_epoch:
-                        torch.save(
-                            save_model,
-                            os.path.join(checkpoint_dir, f'epoch_{epoch}.pth'))
-                    if need_save_best:
-                        torch.save(save_model,
-                                   os.path.join(checkpoint_dir, 'best.pth'))
+                    if local_rank == 0 and total_rank == 0 and save_model is not None:
+                        if need_save_epoch:
+                            torch.save(
+                                save_model,
+                                os.path.join(checkpoint_dir,
+                                             f'epoch_{epoch}.pth'))
+                        if need_save_best:
+                            torch.save(
+                                save_model,
+                                os.path.join(checkpoint_dir, 'best.pth'))
+                else:
+                    # ZeRO-0/1/2: only global rank 0 needs to call state_dict
+                    if local_rank == 0 and total_rank == 0:
+                        save_model = get_model_state_dict(model_engine, config)
+                        if need_save_epoch:
+                            torch.save(
+                                save_model,
+                                os.path.join(checkpoint_dir,
+                                             f'epoch_{epoch}.pth'))
+                        if need_save_best:
+                            torch.save(
+                                save_model,
+                                os.path.join(checkpoint_dir, 'best.pth'))
 
         # Save DeepSpeed checkpoint for resume (all ranks participate)
         client_state = {
@@ -774,6 +818,10 @@ def main():
             'lr': scheduler.current_lr,
             'scheduler_state_dict': scheduler.state_dict(),
         }
+        # Include EMA state in client_state for resume
+        if config.use_ema_model:
+            client_state['ema_model_state'] = config.ema_model.state_dict()
+
         model_engine.save_checkpoint(checkpoint_dir,
                                      tag="",
                                      client_state=client_state,
