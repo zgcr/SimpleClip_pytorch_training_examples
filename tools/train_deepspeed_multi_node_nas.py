@@ -33,7 +33,7 @@ def build_param_groups(config, model):
     lr = optimizer_parameters['lr']
     weight_decay = optimizer_parameters['weight_decay']
 
-    # For Muon, DeepSpeed 0.19.2 native implementation requires each
+    # For Muon, DeepSpeed 0.19.3 native implementation requires each
     # parameter to have a `use_muon` attribute (True/False) so that
     # the engine can split params into Muon group (ndim>=2) and
     # AdamW fallback group (ndim<2).
@@ -45,7 +45,7 @@ def build_param_groups(config, model):
             if not param.requires_grad:
                 continue
             all_params.append(param)
-            # DeepSpeed 0.19.2 engine.py requires `param.use_muon`
+            # DeepSpeed 0.19.3 engine.py requires `param.use_muon`
             # attribute on every parameter. Must match the logic in
             # deepspeed.set_optimizer_flags() (called inside
             # deepspeed.initialize()) which excludes params whose name
@@ -446,8 +446,15 @@ def build_deepspeed_config(config):
     optimizer_parameters = config.optimizer[1]
     assert optimizer_name in ['SGD', 'AdamW', 'Muon'], 'Unsupported optimizer!'
 
-    # for deepspeed==0.19.2, muon optimizer for zero stage3, reduce_scatter must be false, use allreduce instead
-    if optimizer_name == 'Muon' and config.deepspeed_zero_stage == 3:
+    # For deepspeed==0.19.3, Muon optimizer requires reduce_scatter=False for ZeRO stage 1/2/3.
+    # Muon's Newton-Schulz orthogonalization is a whole-matrix operation that needs the full
+    # reduced gradient. With reduce_scatter=True (default), each rank only receives its own
+    # partition slice after reduce-scatter, causing cross-partition parameters to get incorrect
+    # orthogonalized updates (rank-divergent). ZeRO-3 already has a hard ValueError guard;
+    # ZeRO-1/2 silently produces wrong results (see: https://github.com/deepspeedai/DeepSpeed/pull/8090).
+    # This applies regardless of ns_method ("standard" or "gram").
+    # ZeRO stage 0 does not use the ZeRO optimizer wrapper, so reduce_scatter is irrelevant.
+    if optimizer_name == 'Muon' and config.deepspeed_zero_stage in [1, 2, 3]:
         ds_config["zero_optimization"]["reduce_scatter"] = False
 
     if optimizer_name == 'SGD':
@@ -477,7 +484,7 @@ def build_deepspeed_config(config):
             }
         }
     elif optimizer_name == 'Muon':
-        # DeepSpeed 0.19.2 engine.py _configure_basic_optimizer() only
+        # DeepSpeed 0.19.3 engine.py _configure_basic_optimizer() only
         # recognizes these keys for Muon param groups:
         #   muon group:  ["lr", "momentum", "weight_decay", "muon_lr", "ns_method"]
         #   adamw group: ["lr", "betas", "eps", "weight_decay", "adam_lr"]
@@ -497,7 +504,7 @@ def build_deepspeed_config(config):
                 "momentum":
                 optimizer_parameters.get('momentum', 0.95),
                 "ns_method":
-                optimizer_parameters.get('ns_method', 'gram'),
+                optimizer_parameters.get('ns_method', 'standard'),
                 "betas": [
                     optimizer_parameters.get('adamw_beta1', 0.9),
                     optimizer_parameters.get('adamw_beta2', 0.999)
@@ -653,11 +660,11 @@ def main():
     config.compile_support = False
     log_info = f'using torch version:{torch.__version__}'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
-    if re.match(r'2.\d*.\d*', torch.__version__):
+    if re.match(r'2\.\d+\.\d+', torch.__version__):
         config.compile_support = True
         log_info = f'this torch version support torch.compile function.'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
-    elif re.match(r'1.\d*.\d*', torch.__version__):
+    elif re.match(r'1\.\d+\.\d+', torch.__version__):
         log_info = f'this torch version unsupport torch.compile function.'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
     else:
@@ -705,7 +712,7 @@ def main():
         log_info = f'EMA model created with decay={config.ema_model_decay}, tau={config.ema_model_tau}, zero_stage={config.deepspeed_zero_stage}'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
 
-    # deepspeed==0.19.2
+    # deepspeed==0.19.3
     # DeepSpeed默认会将loss除以gradient_accumulation_steps,但CLIP的gradient caching
     # 方法中每次backward得到的梯度本身就是完整梯度的一部分,K次backward之和天然等于完整梯度, 不需要额外的除法。loss backward时设置_scale_wrt_gas=False禁用DeepSpeed的自动loss缩放。
 
@@ -762,7 +769,8 @@ def main():
         # Merge save_interval and is_best saving to avoid redundant
         # GatheredParameters calls under ZeRO-3 (each call triggers
         # all-gather across all ranks for all parameters).
-        need_save_epoch = (epoch % config.save_interval == 0)
+        need_save_epoch = (epoch % config.save_interval == 0
+                           or epoch == config.epochs)
         need_save_best = is_best
 
         if need_save_epoch or need_save_best:
@@ -771,7 +779,7 @@ def main():
                 # For ZeRO-3, get_ema_model_state_dict uses all_gather
                 # (collective op), so all ranks must call it.
                 save_model = config.ema_model.get_ema_model_state_dict(
-                    model_engine, config)
+                    model_engine)
                 if local_rank == 0 and total_rank == 0:
                     if need_save_epoch:
                         torch.save(

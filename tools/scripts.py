@@ -295,7 +295,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
             optimizer.step()
             optimizer.zero_grad()
 
-        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+        if config.use_ema_model:
             config.ema_model.update(model)
 
         # reset
@@ -343,8 +343,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if hasattr(config,
-                               'use_ema_model') and config.use_ema_model:
+                    if config.use_ema_model:
                         save_model = config.ema_model.ema_model.module.state_dict(
                         )
                     elif config.use_compile:
@@ -524,8 +523,8 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
 
         # Update EMA model after optimizer step (unified for both
         # accumulation_steps==1 and accumulation_steps>1 cases).
-        if hasattr(config, 'use_ema_model') and config.use_ema_model:
-            config.ema_model.update(model, config)
+        if config.use_ema_model:
+            config.ema_model.update(model)
 
         # reset accumulation buffers
         if config.accumulation_steps > 1:
@@ -587,7 +586,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                     # For ZeRO-3, get_ema_model_state_dict uses all_gather
                     # (collective op), so all ranks must call it.
                     save_model = config.ema_model.get_ema_model_state_dict(
-                        model, config)
+                        model)
                     if local_rank == 0 and total_rank == 0:
                         torch.save(save_model, save_path)
                 else:
@@ -883,7 +882,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
             optimizer.step()
             optimizer.zero_grad()
 
-        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+        if config.use_ema_model:
             config.ema_model.update(model)
 
         # reset
@@ -932,8 +931,7 @@ def train_huggingface_open_clip_model(train_loader, model, criterion,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if hasattr(config,
-                               'use_ema_model') and config.use_ema_model:
+                    if config.use_ema_model:
                         save_model = config.ema_model.ema_model.module.model.state_dict(
                         )
                     elif config.use_compile:
@@ -1206,7 +1204,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
             optimizer.step()
             optimizer.zero_grad()
 
-        if hasattr(config, 'use_ema_model') and config.use_ema_model:
+        if config.use_ema_model:
             config.ema_model.update(model)
 
         # reset
@@ -1254,8 +1252,7 @@ def train_huggingface_clip_model(train_loader, model, criterion, optimizer,
                    'use_step_save_interval') and config.use_step_save_interval:
             if total_accumulation_iters % config.step_save_interval == 0:
                 if local_rank == 0 and total_rank == 0:
-                    if hasattr(config,
-                               'use_ema_model') and config.use_ema_model:
+                    if config.use_ema_model:
                         save_model = config.ema_model.ema_model.module.model.state_dict(
                         )
                     elif config.use_compile:

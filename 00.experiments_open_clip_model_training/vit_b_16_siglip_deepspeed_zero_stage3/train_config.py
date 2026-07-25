@@ -60,24 +60,19 @@ class config:
     accumulation_steps = 1
 
     optimizer = (
-        'AdamW',
+        'Muon',
         {
             'lr': 5e-4,
-            'global_weight_decay': False,
-            # if global_weight_decay = False
-            # all bias, bn and other 1d params weight set to 0 weight decay
             'weight_decay': 0.2,
-            'no_weight_decay_layer_name_list': [],
-            'beta1': 0.9,
-            'beta2': 0.98,
+            'exclude_muon_layer_name_list': [],
         },
     )
 
     scheduler = (
         'CosineLR',
         {
-            'warm_up_epochs': 30,
-            'min_lr': 1e-6,
+            'warm_up_epochs': 0,
+            'min_lr': 5e-6,
         },
     )
 
@@ -106,6 +101,6 @@ class config:
     # ZeRO-Offload: offload optimizer states (and params for stage 3) to CPU
     deepspeed_offload = False
 
-    use_ema_model = False
+    use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000

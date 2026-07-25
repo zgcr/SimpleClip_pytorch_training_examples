@@ -73,8 +73,8 @@ class config:
     scheduler = (
         'CosineLR',
         {
-            'warm_up_epochs': 10,
-            'min_lr': 1e-6,
+            'warm_up_epochs': 0,
+            'min_lr': 5e-6,
         },
     )
 
@@ -103,6 +103,6 @@ class config:
     # ZeRO-Offload: offload optimizer states (and params for stage 3) to CPU
     deepspeed_offload = False
 
-    use_ema_model = False
+    use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000

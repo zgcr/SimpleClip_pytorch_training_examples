@@ -165,16 +165,17 @@ def main():
         if 'ema_model_state_dict' in checkpoint.keys():
             config.ema_model.ema_model.load_state_dict(
                 checkpoint['ema_model_state_dict'])
+            config.ema_model.updates = checkpoint['ema_model_updates']
 
     # use torch 2.0 compile function
     config.compile_support = False
     log_info = f'using torch version:{torch.__version__}'
     logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
-    if re.match(r'2.\d*.\d*', torch.__version__):
+    if re.match(r'2\.\d+\.\d+', torch.__version__):
         config.compile_support = True
         log_info = f'this torch version support torch.compile function.'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
-    elif re.match(r'1.\d*.\d*', torch.__version__):
+    elif re.match(r'1\.\d+\.\d+', torch.__version__):
         log_info = f'this torch version unsupport torch.compile function.'
         logger.info(log_info) if local_rank == 0 and total_rank == 0 else None
     else:
@@ -206,7 +207,7 @@ def main():
 
         train_time += (time.time() - per_epoch_start_time) / 3600
 
-        if epoch % config.save_interval == 0:
+        if epoch % config.save_interval == 0 or epoch == config.epochs:
             if local_rank == 0 and total_rank == 0:
                 if config.use_ema_model:
                     save_model = config.ema_model.ema_model.module.state_dict()
@@ -254,6 +255,8 @@ def main():
                         save_checkpoint_model,
                         'ema_model_state_dict':
                         config.ema_model.ema_model.state_dict(),
+                        'ema_model_updates':
+                        config.ema_model.updates,
                         'optimizer_state_dict':
                         optimizer.state_dict(),
                         'scheduler_state_dict':

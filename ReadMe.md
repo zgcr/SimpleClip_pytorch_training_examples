@@ -70,7 +70,7 @@ https://github.com/mlfoundations/open_clip
 If you find my work useful in your research, please consider citing:
 ```
 @inproceedings{zgcr,
- title={SimpleAICV-pytorch-training-examples},
+ title={SimpleClip-pytorch-training-examples},
  author={zgcr},
  year={2020-2030}
 }
