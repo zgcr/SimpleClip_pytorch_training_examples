@@ -90,275 +90,85 @@ def build_param_groups(config, model):
         no_weight_decay_layer_name_list = optimizer_parameters[
             'no_weight_decay_layer_name_list']
 
-    # training trick only for VIT
-    if 'lr_layer_decay' in optimizer_parameters.keys(
-    ) and 'lr_layer_decay_block' in optimizer_parameters.keys(
-    ) and 'block_name' in optimizer_parameters.keys():
-        lr_layer_decay = optimizer_parameters['lr_layer_decay']
-        lr_layer_decay_block = optimizer_parameters['lr_layer_decay_block']
-        block_name = optimizer_parameters['block_name']
+    param_layer_name_list = []
+    param_layer_weight_dict = {}
+    param_layer_decay_dict, param_layer_lr_dict = {}, {}
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
 
-        num_layers = len(lr_layer_decay_block) + 1
-        lr_layer_scales = list(lr_layer_decay**(num_layers - i)
-                               for i in range(num_layers + 1))
+        param_layer_name_list.append(name)
+        param_layer_weight_dict[name] = param
 
-        layer_scale_id_0_name_list = [
-            'position_encoding',
-            'cls_token',
-            'patch_embedding',
-        ]
-
-        param_layer_name_list = []
-        param_layer_weight_dict = {}
-        param_layer_decay_dict, param_layer_lr_dict = {}, {}
-        param_layer_lr_scale_dict = {}
-
-        not_group_layer_name_list = []
-        not_group_layer_weight_dict = {}
-        not_group_layer_decay_dict, not_group_layer_lr_dict = {}, {}
-
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            in_not_group_layer = False
-            if block_name in name:
-                not_group_layer_name_list.append(name)
-                not_group_layer_weight_dict[name] = param
-                in_not_group_layer = True
+        if global_weight_decay is False:
+            if param.ndim == 1 or any(no_weight_decay_layer_name in name
+                                      for no_weight_decay_layer_name in
+                                      no_weight_decay_layer_name_list):
+                param_layer_decay_dict[name] = 0.
             else:
-                param_layer_name_list.append(name)
-                param_layer_weight_dict[name] = param
+                per_layer_weight_decay = weight_decay
+                if 'sub_layer_weight_decay' in optimizer_parameters.keys(
+                ) and isinstance(
+                        optimizer_parameters['sub_layer_weight_decay'], dict):
+                    for per_sub_layer_name_prefix, per_sub_layer_weight_decay in optimizer_parameters[
+                            'sub_layer_weight_decay'].items():
+                        if per_sub_layer_name_prefix in name:
+                            per_layer_weight_decay = per_sub_layer_weight_decay
+                            break
+                param_layer_decay_dict[name] = per_layer_weight_decay
+        else:
+            param_layer_decay_dict[name] = weight_decay
 
-            if in_not_group_layer is False:
-                if any(per_layer_scale_id_0_name in name
-                       for per_layer_scale_id_0_name in
-                       layer_scale_id_0_name_list):
-                    param_layer_lr_scale_dict[name] = lr_layer_scales[0]
-                else:
-                    param_layer_lr_scale_dict[name] = 1.
+        per_layer_lr = lr
+        if 'sub_layer_lr' in optimizer_parameters.keys() and isinstance(
+                optimizer_parameters['sub_layer_lr'], dict):
+            for per_sub_layer_name_prefix, per_sub_layer_lr in optimizer_parameters[
+                    'sub_layer_lr'].items():
+                if per_sub_layer_name_prefix in name:
+                    per_layer_lr = per_sub_layer_lr
+                    break
+        param_layer_lr_dict[name] = per_layer_lr
 
-            if global_weight_decay is False:
-                if param.ndim == 1 or any(no_weight_decay_layer_name in name
-                                          for no_weight_decay_layer_name in
-                                          no_weight_decay_layer_name_list):
-                    if in_not_group_layer:
-                        not_group_layer_decay_dict[name] = 0.
-                    else:
-                        param_layer_decay_dict[name] = 0.
-                else:
-                    per_layer_weight_decay = weight_decay
-                    if 'sub_layer_weight_decay' in optimizer_parameters.keys(
-                    ) and isinstance(
-                            optimizer_parameters['sub_layer_weight_decay'],
-                            dict):
-                        for per_sub_layer_name_prefix, per_sub_layer_weight_decay in optimizer_parameters[
-                                'sub_layer_weight_decay'].items():
-                            if per_sub_layer_name_prefix in name:
-                                per_layer_weight_decay = per_sub_layer_weight_decay
-                                break
+    assert len(param_layer_name_list) == len(param_layer_weight_dict) == len(
+        param_layer_decay_dict) == len(param_layer_lr_dict)
 
-                    if in_not_group_layer:
-                        not_group_layer_decay_dict[
-                            name] = per_layer_weight_decay
-                    else:
-                        param_layer_decay_dict[name] = per_layer_weight_decay
-            else:
-                if in_not_group_layer:
-                    not_group_layer_decay_dict[name] = weight_decay
-                else:
-                    param_layer_decay_dict[name] = weight_decay
+    unique_decays = list(set(param_layer_decay_dict.values()))
+    unique_lrs = list(set(param_layer_lr_dict.values()))
 
-            per_layer_lr = lr
-            if 'sub_layer_lr' in optimizer_parameters.keys() and isinstance(
-                    optimizer_parameters['sub_layer_lr'], dict):
-                for per_sub_layer_name_prefix, per_sub_layer_lr in optimizer_parameters[
-                        'sub_layer_lr'].items():
-                    if per_sub_layer_name_prefix in name:
-                        per_layer_lr = per_sub_layer_lr
-                        break
-            if in_not_group_layer:
-                not_group_layer_lr_dict[name] = per_layer_lr
-            else:
-                param_layer_lr_dict[name] = per_layer_lr
+    lr_weight_decay_combination = []
+    for per_decay in unique_decays:
+        for per_lr in unique_lrs:
+            lr_weight_decay_combination.append([per_decay, per_lr])
 
-        assert len(param_layer_name_list) == len(
-            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
-                param_layer_lr_dict) == len(param_layer_lr_scale_dict)
+    model_params_weight_decay_list = []
+    model_layer_weight_decay_list = []
+    for per_decay, per_lr in lr_weight_decay_combination:
+        per_decay_lr_param_list, per_decay_lr_name_list = [], []
+        for per_layer_name in param_layer_name_list:
+            per_layer_weight = param_layer_weight_dict[per_layer_name]
+            per_layer_weight_decay = param_layer_decay_dict[per_layer_name]
+            per_layer_lr = param_layer_lr_dict[per_layer_name]
 
-        assert len(not_group_layer_name_list) == len(
-            not_group_layer_weight_dict) == len(
-                not_group_layer_decay_dict) == len(not_group_layer_lr_dict)
+            if per_layer_weight_decay == per_decay and per_layer_lr == per_lr:
+                per_decay_lr_param_list.append(per_layer_weight)
+                per_decay_lr_name_list.append(per_layer_name)
 
-        per_group_weight_nums = len(not_group_layer_name_list) // len(
-            lr_layer_decay_block)
-        for layer_id in range(0, len(lr_layer_decay_block)):
-            for per_group_id in range(per_group_weight_nums):
-                per_group_layer_names = not_group_layer_name_list[
-                    layer_id * per_group_weight_nums + per_group_id]
+        assert len(per_decay_lr_param_list) == len(per_decay_lr_name_list)
 
-                if not isinstance(per_group_layer_names, list):
-                    per_layer_name = per_group_layer_names
-                    param_layer_name_list.append(per_layer_name)
-                    param_layer_weight_dict[
-                        per_layer_name] = not_group_layer_weight_dict[
-                            per_layer_name]
-                    param_layer_decay_dict[
-                        per_layer_name] = not_group_layer_decay_dict[
-                            per_layer_name]
-                    param_layer_lr_dict[
-                        per_layer_name] = not_group_layer_lr_dict[
-                            per_layer_name]
-                    param_layer_lr_scale_dict[
-                        per_layer_name] = lr_layer_scales[layer_id + 1]
-                else:
-                    for per_layer_name in per_group_layer_names:
-                        param_layer_name_list.append(per_layer_name)
-                        param_layer_weight_dict[
-                            per_layer_name] = not_group_layer_weight_dict[
-                                per_layer_name]
-                        param_layer_decay_dict[
-                            per_layer_name] = not_group_layer_decay_dict[
-                                per_layer_name]
-                        param_layer_lr_dict[
-                            per_layer_name] = not_group_layer_lr_dict[
-                                per_layer_name]
-                        param_layer_lr_scale_dict[
-                            per_layer_name] = lr_layer_scales[layer_id + 1]
+        if len(per_decay_lr_param_list) > 0:
+            model_params_weight_decay_list.append({
+                'params': per_decay_lr_param_list,
+                'weight_decay': per_decay,
+                'lr': per_lr,
+            })
+            model_layer_weight_decay_list.append({
+                'name': per_decay_lr_name_list,
+                'weight_decay': per_decay,
+                'lr': per_lr,
+            })
 
-        assert len(param_layer_name_list) == len(
-            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
-                param_layer_lr_dict) == len(param_layer_lr_scale_dict)
-
-        unique_decays = list(set(param_layer_decay_dict.values()))
-        unique_lrs = list(set(param_layer_lr_dict.values()))
-        unique_lr_scales = list(set(param_layer_lr_scale_dict.values()))
-
-        lr_weight_decay_combination = []
-        for per_decay in unique_decays:
-            for per_lr in unique_lrs:
-                for per_lr_scale in unique_lr_scales:
-                    lr_weight_decay_combination.append(
-                        [per_decay, per_lr, per_lr_scale])
-
-        model_params_weight_decay_list = []
-        model_layer_weight_decay_list = []
-        for per_decay, per_lr, per_lr_scale in lr_weight_decay_combination:
-            per_decay_lr_lrscale_param_list, per_decay_lr_lrscale_name_list = [], []
-            for per_layer_name in param_layer_name_list:
-                per_layer_weight = param_layer_weight_dict[per_layer_name]
-                per_layer_weight_decay = param_layer_decay_dict[per_layer_name]
-                per_layer_lr = param_layer_lr_dict[per_layer_name]
-                per_layer_lr_scale = param_layer_lr_scale_dict[per_layer_name]
-
-                if per_layer_weight_decay == per_decay and per_layer_lr == per_lr and per_layer_lr_scale == per_lr_scale:
-                    per_decay_lr_lrscale_param_list.append(per_layer_weight)
-                    per_decay_lr_lrscale_name_list.append(per_layer_name)
-
-            assert len(per_decay_lr_lrscale_param_list) == len(
-                per_decay_lr_lrscale_name_list)
-
-            if len(per_decay_lr_lrscale_param_list) > 0:
-                model_params_weight_decay_list.append({
-                    'params':
-                    per_decay_lr_lrscale_param_list,
-                    'weight_decay':
-                    per_decay,
-                    'lr':
-                    per_lr * per_lr_scale,
-                })
-                model_layer_weight_decay_list.append({
-                    'name': per_decay_lr_lrscale_name_list,
-                    'weight_decay': per_decay,
-                    'lr': per_lr,
-                    'lr_scale': per_lr_scale,
-                })
-
-        assert len(model_params_weight_decay_list) == len(
-            model_layer_weight_decay_list)
-
-    else:
-        param_layer_name_list = []
-        param_layer_weight_dict = {}
-        param_layer_decay_dict, param_layer_lr_dict = {}, {}
-        for name, param in model.named_parameters():
-            if not param.requires_grad:
-                continue
-
-            param_layer_name_list.append(name)
-            param_layer_weight_dict[name] = param
-
-            if global_weight_decay is False:
-                if param.ndim == 1 or any(no_weight_decay_layer_name in name
-                                          for no_weight_decay_layer_name in
-                                          no_weight_decay_layer_name_list):
-                    param_layer_decay_dict[name] = 0.
-                else:
-                    per_layer_weight_decay = weight_decay
-                    if 'sub_layer_weight_decay' in optimizer_parameters.keys(
-                    ) and isinstance(
-                            optimizer_parameters['sub_layer_weight_decay'],
-                            dict):
-                        for per_sub_layer_name_prefix, per_sub_layer_weight_decay in optimizer_parameters[
-                                'sub_layer_weight_decay'].items():
-                            if per_sub_layer_name_prefix in name:
-                                per_layer_weight_decay = per_sub_layer_weight_decay
-                                break
-                    param_layer_decay_dict[name] = per_layer_weight_decay
-            else:
-                param_layer_decay_dict[name] = weight_decay
-
-            per_layer_lr = lr
-            if 'sub_layer_lr' in optimizer_parameters.keys() and isinstance(
-                    optimizer_parameters['sub_layer_lr'], dict):
-                for per_sub_layer_name_prefix, per_sub_layer_lr in optimizer_parameters[
-                        'sub_layer_lr'].items():
-                    if per_sub_layer_name_prefix in name:
-                        per_layer_lr = per_sub_layer_lr
-                        break
-            param_layer_lr_dict[name] = per_layer_lr
-
-        assert len(param_layer_name_list) == len(
-            param_layer_weight_dict) == len(param_layer_decay_dict) == len(
-                param_layer_lr_dict)
-
-        unique_decays = list(set(param_layer_decay_dict.values()))
-        unique_lrs = list(set(param_layer_lr_dict.values()))
-
-        lr_weight_decay_combination = []
-        for per_decay in unique_decays:
-            for per_lr in unique_lrs:
-                lr_weight_decay_combination.append([per_decay, per_lr])
-
-        model_params_weight_decay_list = []
-        model_layer_weight_decay_list = []
-        for per_decay, per_lr in lr_weight_decay_combination:
-            per_decay_lr_param_list, per_decay_lr_name_list = [], []
-            for per_layer_name in param_layer_name_list:
-                per_layer_weight = param_layer_weight_dict[per_layer_name]
-                per_layer_weight_decay = param_layer_decay_dict[per_layer_name]
-                per_layer_lr = param_layer_lr_dict[per_layer_name]
-
-                if per_layer_weight_decay == per_decay and per_layer_lr == per_lr:
-                    per_decay_lr_param_list.append(per_layer_weight)
-                    per_decay_lr_name_list.append(per_layer_name)
-
-            assert len(per_decay_lr_param_list) == len(per_decay_lr_name_list)
-
-            if len(per_decay_lr_param_list) > 0:
-                model_params_weight_decay_list.append({
-                    'params': per_decay_lr_param_list,
-                    'weight_decay': per_decay,
-                    'lr': per_lr,
-                })
-                model_layer_weight_decay_list.append({
-                    'name': per_decay_lr_name_list,
-                    'weight_decay': per_decay,
-                    'lr': per_lr,
-                })
-
-        assert len(model_params_weight_decay_list) == len(
-            model_layer_weight_decay_list)
+    assert len(model_params_weight_decay_list) == len(
+        model_layer_weight_decay_list)
 
     return model_params_weight_decay_list, model_layer_weight_decay_list
 
