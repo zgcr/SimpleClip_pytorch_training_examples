@@ -5,12 +5,12 @@ BASE_DIR = os.path.dirname(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(BASE_DIR)
 
-from tools.path import image_caption_pair_dataset_path
+from tools.path import realsyn_dataset_path
 
 from SimpleClip.models import gqa_clip
 from SimpleClip.models.tokenizer import Qwen35Tokenizer
 from SimpleClip.losses import SigLipLoss
-from SimpleClip.datasets.cc3m_dataset import CC3MDataset
+from SimpleClip.datasets.realsyn_dataset import RealSynDataset
 from SimpleClip.common import Opencv2PIL, TorchRandomResizedCrop, TorchMeanStdNormalize, ImageCaptionPairCollater, load_state_dict
 
 import torch
@@ -36,12 +36,16 @@ class config:
     use_siglip_loss = True
     train_criterion = SigLipLoss(dist_type='bidir')
 
-    train_dataset = CC3MDataset(
-        root_dir=image_caption_pair_dataset_path,
+    train_dataset = RealSynDataset(
+        root_dir=realsyn_dataset_path,
         dataset_name=[
-            'cc3m_final',
+            'RealSyn15M_1_5',
+            'RealSyn15M_6_10',
+            'RealSyn15M_11_15',
+            'RealSyn15M_16_21',
         ],
-        set_name='val',
+        caption_type='web_caption',
+        random_select_caption=True,
         transform=transforms.Compose([
             Opencv2PIL(),
             TorchRandomResizedCrop(resize=224,
@@ -54,7 +58,7 @@ class config:
 
     seed = 0
     # batch_size is total size
-    batch_size = 32
+    batch_size = 512
     # num_workers is total workers
     num_workers = 8
     accumulation_steps = 1

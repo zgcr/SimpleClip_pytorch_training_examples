@@ -12,6 +12,8 @@ from tqdm import tqdm
 
 import deepspeed
 
+from deepspeed.utils import safe_get_full_fp32_param, safe_set_full_fp32_param
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -536,12 +538,29 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
             }
 
         # Note: we clamp to 4.6052 = ln(100), as in the original paper.
+        # DeepSpeed keeps a fp32 master copy of every parameter and refreshes
+        # the low precision model parameter from that master copy at each
+        # optimizer step, so clamping the low precision parameter alone is
+        # silently undone by the next step. The fp32 master copy has to be
+        # clamped as well to make the constraint persistent.
+        # safe_get_full_fp32_param is a collective op (all_reduce for ZeRO
+        # stage 1/2, all_gather for ZeRO stage 3), so all ranks must call it.
+        # It returns None for ZeRO stage 0, where no master copy exists and
+        # clamping the model parameter is already enough.
         with torch.no_grad():
             if config.use_compile:
                 logit_scale = model.module._orig_mod.logit_scale
             else:
                 logit_scale = model.module.logit_scale
 
+            full_fp32_logit_scale = safe_get_full_fp32_param(logit_scale)
+            if full_fp32_logit_scale is not None:
+                safe_set_full_fp32_param(
+                    logit_scale, full_fp32_logit_scale.clamp(0, math.log(100)))
+
+            # also clamp the low precision parameter so that the constraint
+            # takes effect immediately in the next forward, before the master
+            # copy is written back at the next optimizer step.
             if config.deepspeed_zero_stage == 3:
                 with deepspeed.zero.GatheredParameters(logit_scale,
                                                        modifier_rank=0):

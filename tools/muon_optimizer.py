@@ -183,10 +183,9 @@ class MuonAdamW(Optimizer):
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
 
-                # apply weight decay
-                p.data.mul_(1 - lr * wd)
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
 
-                # apply update
                 p.data.add_(u.view(original_shape), alpha=-adjusted_lr)
 
             ############################
@@ -223,10 +222,15 @@ class MuonAdamW(Optimizer):
                 m_hat = buf1 / bias_correction1
                 v_hat = buf2 / bias_correction2
 
-                g = m_hat / (v_hat.sqrt() + eps)
+                # v_hat <- v_hat.sqrt() + eps
+                v_hat.sqrt_().add_(eps)
+                # m_hat <- m_hat / (v_hat.sqrt() + eps)
+                m_hat.div_(v_hat)
 
-                p.data.mul_(1 - lr * weight_decay)
-                p.data.add_(g, alpha=-lr)
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
+
+                p.data.add_(m_hat, alpha=-lr)
 
         return loss
 
@@ -350,8 +354,8 @@ class MuonSGD(Optimizer):
                 # scale update
                 adjusted_lr = self.adjust_lr_for_muon(lr, p.shape)
 
-                # apply weight decay
-                p.data.mul_(1 - lr * wd)
+                if wd != 0:
+                    p.data.mul_(1 - lr * wd)
 
                 # apply update
                 p.data.add_(u.view(original_shape), alpha=-adjusted_lr)
@@ -372,7 +376,9 @@ class MuonSGD(Optimizer):
                 g = p.grad
                 if g is None:
                     continue
-                p.data.mul_(1 - lr * weight_decay)
+
+                if weight_decay != 0:
+                    p.data.mul_(1 - lr * weight_decay)
 
                 state = self.state[p]
                 if "momentum_buffer" not in state:
