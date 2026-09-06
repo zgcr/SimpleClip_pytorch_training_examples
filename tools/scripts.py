@@ -61,6 +61,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
     if config.accumulation_steps > 1:
         accumulation_images = []
         accumulation_texts = []
+        accumulation_rng_states = []
         accumulation_features = {
             'image_features': [],
             'text_features': [],
@@ -121,6 +122,8 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
+                accumulation_rng_states.append(torch.cuda.get_rng_state())
+
                 if config.use_amp:
                     with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
@@ -148,8 +151,8 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
                 iter_index += 1
                 continue
 
-            assert len(accumulation_images) == len(
-                accumulation_texts) == config.accumulation_steps
+            assert len(accumulation_images) == len(accumulation_texts) == len(
+                accumulation_rng_states) == config.accumulation_steps
 
             assert len(accumulation_features['image_features']) == len(
                 accumulation_features['text_features']
@@ -163,6 +166,9 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
             for accumulation_idx in range(config.accumulation_steps):
                 images = accumulation_images[accumulation_idx]
                 tokens = accumulation_texts[accumulation_idx]
+                # 恢复缓存阶段的RNG状态,使重算的前向与缓存时逐位一致
+                torch.cuda.set_rng_state(
+                    accumulation_rng_states[accumulation_idx])
                 if config.use_amp:
                     with autocast(device_type="cuda", dtype=config.amp_type):
                         if config.use_siglip_loss:
@@ -304,6 +310,7 @@ def train_clip_model(train_loader, model, criterion, optimizer, scheduler,
         if config.accumulation_steps > 1:
             accumulation_images = []
             accumulation_texts = []
+            accumulation_rng_states = []
             accumulation_features = {
                 'image_features': [],
                 'text_features': [],
@@ -394,6 +401,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
     if config.accumulation_steps > 1:
         accumulation_images = []
         accumulation_texts = []
+        accumulation_rng_states = []
         accumulation_features = {
             'image_features': [],
             'text_features': [],
@@ -436,6 +444,8 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
         else:
             # First, cache the features without any gradient tracking.
             with torch.no_grad():
+                accumulation_rng_states.append(torch.cuda.get_rng_state())
+
                 if config.use_siglip_loss:
                     outputs = model(images, tokens)
                 else:
@@ -455,8 +465,8 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
                 iter_index += 1
                 continue
 
-            assert len(accumulation_images) == len(
-                accumulation_texts) == config.accumulation_steps
+            assert len(accumulation_images) == len(accumulation_texts) == len(
+                accumulation_rng_states) == config.accumulation_steps
 
             assert len(accumulation_features['image_features']) == len(
                 accumulation_features['text_features']
@@ -468,6 +478,9 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
             for accumulation_idx in range(config.accumulation_steps):
                 images = accumulation_images[accumulation_idx]
                 tokens = accumulation_texts[accumulation_idx]
+                # 恢复缓存阶段的RNG状态,使重算的前向与缓存时逐位一致
+                torch.cuda.set_rng_state(
+                    accumulation_rng_states[accumulation_idx])
 
                 if config.use_siglip_loss:
                     outputs = model(images, tokens)
@@ -532,6 +545,7 @@ def train_clip_model_deepspeed(train_loader, model, criterion, optimizer,
         if config.accumulation_steps > 1:
             accumulation_images = []
             accumulation_texts = []
+            accumulation_rng_states = []
             accumulation_features = {
                 'image_features': [],
                 'text_features': [],

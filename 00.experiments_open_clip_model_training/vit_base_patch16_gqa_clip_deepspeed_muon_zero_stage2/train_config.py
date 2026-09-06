@@ -7,9 +7,9 @@ sys.path.append(BASE_DIR)
 
 from tools.path import realsyn_dataset_path
 
-from SimpleClip.models import clip
+from SimpleClip.models import gqa_clip
 from SimpleClip.models.tokenizer import Qwen35Tokenizer
-from SimpleClip.losses import SigLipLoss
+from SimpleClip.losses import ClipLoss
 from SimpleClip.datasets.realsyn_dataset import RealSynDataset
 from SimpleClip.common import Opencv2PIL, TorchRandomResizedCrop, TorchMeanStdNormalize, ImageCaptionPairCollater, load_state_dict
 
@@ -19,9 +19,9 @@ from torchvision.transforms.functional import InterpolationMode
 
 
 class config:
-    network = 'vit_base_patch16_siglip'
+    network = 'vit_base_patch16_gqa_clip'
 
-    model = clip.__dict__[network](**{
+    model = gqa_clip.__dict__[network](**{
         'use_gradient_checkpoint': True,
     })
 
@@ -33,8 +33,10 @@ class config:
 
     tokenizer = Qwen35Tokenizer(context_length=model.context_length)
 
-    use_siglip_loss = True
-    train_criterion = SigLipLoss(dist_type='bidir')
+    use_siglip_loss = False
+    train_criterion = ClipLoss(cache_labels=True,
+                               compute_local_loss=True,
+                               gather_features_with_grad=True)
 
     train_dataset = RealSynDataset(
         root_dir=realsyn_dataset_path,
@@ -48,7 +50,7 @@ class config:
         random_select_caption=True,
         transform=transforms.Compose([
             Opencv2PIL(),
-            TorchRandomResizedCrop(resize=224,
+            TorchRandomResizedCrop(resize=256,
                                    scale=(0.9, 1.0),
                                    interpolation=InterpolationMode.BICUBIC),
             TorchMeanStdNormalize(mean=[0.48145466, 0.4578275, 0.40821073],
@@ -58,13 +60,13 @@ class config:
 
     seed = 0
     # batch_size is total size
-    batch_size = 512
+    batch_size = 1024
     # num_workers is total workers
     num_workers = 8
     accumulation_steps = 1
 
     optimizer = (
-        'MuonAdamW',
+        'Muon',
         {
             'lr': 5e-4,
             'weight_decay': 0.2,
@@ -75,7 +77,7 @@ class config:
     scheduler = (
         'CosineLR',
         {
-            'warm_up_epochs': 0,
+            'warm_up_epochs': 0.1,
             'min_lr': 5e-6,
         },
     )
@@ -103,3 +105,8 @@ class config:
     use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000
+
+    # ZeRO stage: 1, 2, 3
+    deepspeed_zero_stage = 2
+    # ZeRO-Offload: offload optimizer states (and params for stage 3) to CPU
+    deepspeed_offload = False

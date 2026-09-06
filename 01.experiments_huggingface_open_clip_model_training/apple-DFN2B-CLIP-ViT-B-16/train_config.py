@@ -51,7 +51,7 @@ class config:
 
     seed = 0
     # batch_size is total size
-    batch_size = 512
+    batch_size = 1024
     # num_workers is total workers
     num_workers = 8
     accumulation_steps = 1
@@ -61,6 +61,7 @@ class config:
         {
             'lr': 1e-4,
             'weight_decay': 0.2,
+            'global_weight_decay': False,
             'exclude_muon_layer_name_list': [],
         },
     )
@@ -68,7 +69,7 @@ class config:
     scheduler = (
         'CosineLR',
         {
-            'warm_up_epochs': 0,
+            'warm_up_epochs': 0.1,
             'min_lr': 5e-6,
         },
     )
@@ -96,3 +97,5 @@ class config:
     use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000
+
+    clip_max_norm = 1.0

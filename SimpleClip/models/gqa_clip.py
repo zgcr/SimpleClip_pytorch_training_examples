@@ -1,3 +1,4 @@
+import math
 import numpy as np
 
 import torch
@@ -69,8 +70,8 @@ class RopePositionEmbedding1D(nn.Module):
         self.register_buffer('inv_freq', inv_freq, persistent=False)
 
         t = torch.arange(max_seq_length, dtype=torch.float32)
+        # [max_seq_length, head_dim//2],每个旋转对只需一个角度
         freqs = torch.outer(t, inv_freq)
-        freqs = freqs.repeat_interleave(2, dim=1)
         self.register_buffer('cos_cached', freqs.cos(), persistent=False)
         self.register_buffer('sin_cached', freqs.sin(), persistent=False)
 
@@ -80,42 +81,80 @@ class RopePositionEmbedding1D(nn.Module):
 
 class RopePositionEmbedding2D(nn.Module):
 
-    def __init__(self, dim, num_heads, base=10000.0):
+    def __init__(self,
+                 dim,
+                 num_heads,
+                 min_period=0.5,
+                 max_period=100.0,
+                 jitter_coord_scale=2.0,
+                 rescale_coord_scale=2.0):
         super(RopePositionEmbedding2D, self).__init__()
 
         head_dim = dim // num_heads
-        assert head_dim % 2 == 0
+        # head_dim需要被4整除:一半维度给h一半给w,每半内部再两两配对做旋转
+        assert head_dim % 4 == 0
 
-        half_head_dim = head_dim // 2
+        self.min_period = min_period
+        self.max_period = max_period
+        self.jitter_coord_scale = jitter_coord_scale
+        self.rescale_coord_scale = rescale_coord_scale
 
-        freqs_h = 1.0 / (base**(torch.arange(
-            0, half_head_dim, 2, dtype=torch.float32) / half_head_dim))
-        freqs_w = 1.0 / (base**(torch.arange(
-            0, half_head_dim, 2, dtype=torch.float32) / half_head_dim))
+        # 每个方向(h/w)的period数量 = head_dim//4
+        num_periods = head_dim // 4
+        if num_periods > 1:
+            exponents = torch.arange(num_periods,
+                                     dtype=torch.float32) / (num_periods - 1)
+        else:
+            exponents = torch.zeros(num_periods, dtype=torch.float32)
+        periods = min_period * (max_period / min_period)**exponents
 
-        self.register_buffer('freqs_h', freqs_h, persistent=False)
-        self.register_buffer('freqs_w', freqs_w, persistent=False)
+        self.register_buffer('periods', periods, persistent=False)
 
-    def forward(self, H, W):
-        device = self.freqs_h.device
+    def forward(self, H, W, batch_size):
+        device = self.periods.device
 
-        coords_h = torch.arange(H, dtype=torch.float32, device=device)
-        coords_w = torch.arange(W, dtype=torch.float32, device=device)
+        # 坐标归一化到[-1,1],与H/W无关
+        coords_h = 2.0 * (torch.arange(H, dtype=torch.float32, device=device) +
+                          0.5) / H - 1.0
+        coords_w = 2.0 * (torch.arange(W, dtype=torch.float32, device=device) +
+                          0.5) / W - 1.0
 
         grid_h, grid_w = torch.meshgrid(coords_h, coords_w, indexing="ij")
 
-        grid_h = (grid_h + 0.5) / H
-        grid_w = (grid_w + 0.5) / W
+        # [H, W] -> [batch_size, H, W],每个样本独立采样坐标增强(与DINOv3一致)。
+        # 若整个batch共享同一份增强,对比学习中所有正负样本被施加相同畸变,
+        # 增强的有效样本数会从batch_size退化为1。
+        grid_h = grid_h[None].expand(batch_size, -1, -1)
+        grid_w = grid_w[None].expand(batch_size, -1, -1)
 
-        coords_h = grid_h.flatten()
-        coords_w = grid_w.flatten()
+        if self.training:
+            if self.jitter_coord_scale > 1.0:
+                log_jitter = math.log(self.jitter_coord_scale)
+                jitter = torch.empty(batch_size, 2, device=device).uniform_(
+                    -log_jitter, log_jitter).exp()
+                grid_h = grid_h * jitter[:, 0, None, None]
+                grid_w = grid_w * jitter[:, 1, None, None]
 
-        angles_h = coords_h[:, None] * self.freqs_h[None, :]  # [HW, D//4]
-        angles_w = coords_w[:, None] * self.freqs_w[None, :]  # [HW, D//4]
+            if self.rescale_coord_scale > 1.0:
+                log_rescale = math.log(self.rescale_coord_scale)
+                rescale = torch.empty(batch_size, 1, 1,
+                                      device=device).uniform_(
+                                          -log_rescale, log_rescale).exp()
+                grid_h = grid_h * rescale
+                grid_w = grid_w * rescale
 
-        angles_h = angles_h.repeat_interleave(2, dim=1)  # [HW, head_dim//2]
-        angles_w = angles_w.repeat_interleave(2, dim=1)  # [HW, head_dim//2]
-        angles = torch.cat([angles_h, angles_w], dim=1)  # [HW, head_dim]
+        # [batch_size, HW]
+        coords_h = grid_h.reshape(batch_size, -1)
+        coords_w = grid_w.reshape(batch_size, -1)
+
+        # [batch_size, HW, head_dim//4]
+        angles_h = 2.0 * math.pi * coords_h[:, :, None] / self.periods[None,
+                                                                       None, :]
+        angles_w = 2.0 * math.pi * coords_w[:, :, None] / self.periods[None,
+                                                                       None, :]
+
+        # [batch_size, HW, head_dim//2],每个旋转对只需一个角度
+        angles = torch.cat([angles_h, angles_w], dim=-1)
 
         cos = torch.cos(angles)
         sin = torch.sin(angles)
@@ -124,38 +163,32 @@ class RopePositionEmbedding2D(nn.Module):
 
 
 def apply_rope(x, sin, cos):
-    """
-    Standard pair-wise RoPE rotation for 1D position embeddings/2D position embeddings.
-    
-    Args:
-        x: [..., D] - Input tensor
-        sin: [..., D] - Sine values in repeated format [s0, s0, s1, s1, ...]
-        cos: [..., D] - Cosine values in repeated format [c0, c0, c1, c1, ...]
-    
-    Returns:
-        Rotated tensor with same shape as input
-    """
     # Reshape to pairs: [..., D//2, 2]
     x_pairs = x.reshape(*x.shape[:-1], -1, 2)
 
-    # sin/cos are already repeated, reshape and take first of each pair
-    sin = sin.reshape(*sin.shape[:-1], -1, 2)[..., 0]  # [..., D//2]
-    cos = cos.reshape(*cos.shape[:-1], -1, 2)[..., 0]  # [..., D//2]
+    # sin/cos为紧凑形式,补一个尾轴广播到旋转对的2个分量上。
+    # [..., D//2, 1]
+    sin = sin.to(x.dtype).unsqueeze(-1)
+    # [..., D//2, 1]
+    cos = cos.to(x.dtype).unsqueeze(-1)
 
     # Extract pair elements
-    x1 = x_pairs[..., 0]  # [..., D//2]
-    x2 = x_pairs[..., 1]  # [..., D//2]
+    # [..., D//2, 1]
+    x1 = x_pairs[..., 0:1]
+    # [..., D//2, 1]
+    x2 = x_pairs[..., 1:2]
 
     # Standard RoPE rotation:
     # [cos  -sin] [x1]
-    # [sin   cos] [x2]
     rotated_x1 = x1 * cos - x2 * sin
+    # [sin   cos] [x2]
     rotated_x2 = x1 * sin + x2 * cos
 
-    # Stack and flatten back to original shape
-    rotated = torch.stack([rotated_x1, rotated_x2], dim=-1)
+    # Concat and flatten back to original shape
+    rotated = torch.cat([rotated_x1, rotated_x2], dim=-1)
+    rotated = rotated.flatten(-2)
 
-    return rotated.flatten(-2)
+    return rotated
 
 
 class GroupedQueryAttention(nn.Module):
@@ -186,7 +219,7 @@ class GroupedQueryAttention(nn.Module):
         self.q_norm = RMSNorm(self.head_dim)
         self.k_norm = RMSNorm(self.head_dim)
 
-    def forward(self, x, rope=None, attn_mask=None):
+    def forward(self, x, rope=None, attn_mask=None, is_causal=False):
         B, N, C = x.shape
 
         q = self.q_proj(x).view(B, N, self.num_heads,
@@ -204,36 +237,22 @@ class GroupedQueryAttention(nn.Module):
         if rope is not None:
             sin, cos = rope
             if self.use_rope_2d:
-                assert N - 1 == sin.shape[
-                    0], f"Patch count {N-1} != RoPE length {sin.shape[0]}"
-                sin = sin.unsqueeze(0).unsqueeze(0)
-                cos = cos.unsqueeze(0).unsqueeze(0)
-
-                # 分离cls_token和patch_tokens
-                q_cls, q_patches = q[:, :, :1, :], q[:, :, 1:, :]
-                k_cls, k_patches = k[:, :, :1, :], k[:, :, 1:, :]
-
-                # 只对patch_tokens应用RoPE
-                q_patches = apply_rope(q_patches, sin, cos)
-                k_patches = apply_rope(k_patches, sin, cos)
-
-                # 合并回去
-                q = torch.cat([q_cls, q_patches], dim=2)
-                k = torch.cat([k_cls, k_patches], dim=2)
+                # 视觉塔无cls_token,全部token都是patch,直接整体应用2D RoPE
+                # sin/cos为[B, N, head_dim//2],每个样本的坐标增强相互独立
+                assert N == sin.shape[
+                    1], f"Patch count {N} != RoPE length {sin.shape[1]}"
+                # [B, N, D//2] -> [B, 1, N, D//2]
+                sin = sin.unsqueeze(1)
+                cos = cos.unsqueeze(1)
             else:
                 # 1D RoPE for text
-                # [1, 1, N, D]
+                # [1, 1, N, D//2]
                 assert N <= sin.shape[
                     0], f"Sequence length {N} exceeds RoPE max length {sin.shape[0]}"
                 sin = sin[:N].unsqueeze(0).unsqueeze(0)
                 cos = cos[:N].unsqueeze(0).unsqueeze(0)
-                q = apply_rope(q, sin, cos)
-                k = apply_rope(k, sin, cos)
-
-        # GQA
-        if self.num_kv_groups > 1:
-            k = k.repeat_interleave(self.num_kv_groups, dim=1)
-            v = v.repeat_interleave(self.num_kv_groups, dim=1)
+            q = apply_rope(q, sin, cos)
+            k = apply_rope(k, sin, cos)
 
         # Flash Attention
         out = F.scaled_dot_product_attention(
@@ -242,7 +261,9 @@ class GroupedQueryAttention(nn.Module):
             v,
             attn_mask=attn_mask,
             dropout_p=self.dropout if self.training else 0.0,
-            scale=self.scale)
+            scale=self.scale,
+            is_causal=is_causal,
+            enable_gqa=True)
 
         out = out.transpose(1, 2).contiguous().view(B, N, C)
         out = self.o_proj(out)
@@ -278,18 +299,67 @@ class TransformerBlock(nn.Module):
             dim=dim, init_values=layer_scale_init_values
         ) if layer_scale_init_values is not None else nn.Identity()
 
-    def forward(self, x, rope=None, attn_mask=None):
+    def forward(self, x, rope=None, attn_mask=None, is_causal=False):
         x = x + self.ls1(
-            self.attn(self.norm1(x), rope=rope, attn_mask=attn_mask))
+            self.attn(self.norm1(x),
+                      rope=rope,
+                      attn_mask=attn_mask,
+                      is_causal=is_causal))
         x = x + self.ls2(self.mlp(self.norm2(x)))
 
         return x
 
 
+class AttentionPool(nn.Module):
+
+    def __init__(self, dim, num_heads, num_kv_heads):
+        super(AttentionPool, self).__init__()
+        assert dim % num_heads == 0
+        assert num_heads % num_kv_heads == 0
+
+        self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim**-0.5
+
+        self.query = nn.Parameter(torch.zeros(dim))
+
+        self.q_proj = nn.Linear(dim, num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(dim, num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(dim, dim, bias=False)
+
+        self.q_norm = RMSNorm(self.head_dim)
+        self.k_norm = RMSNorm(self.head_dim)
+
+    def forward(self, x):
+        B, N, C = x.shape
+
+        q = self.q_proj(self.query).view(1, self.num_heads, 1,
+                                         self.head_dim).expand(B, -1, -1, -1)
+        k = self.k_proj(x).view(B, N, self.num_kv_heads,
+                                self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, N, self.num_kv_heads,
+                                self.head_dim).transpose(1, 2)
+
+        q = self.q_norm(q)
+        k = self.k_norm(k)
+
+        out = F.scaled_dot_product_attention(q,
+                                             k,
+                                             v,
+                                             scale=self.scale,
+                                             enable_gqa=True)
+
+        out = self.o_proj(out.transpose(1, 2).reshape(B, C))
+
+        return out
+
+
 class VisionEncoder(nn.Module):
 
     def __init__(self,
-                 image_size=224,
+                 image_size=256,
                  patch_size=16,
                  in_channels=3,
                  embed_dim=768,
@@ -300,7 +370,10 @@ class VisionEncoder(nn.Module):
                  output_dim=512,
                  dropout=0.0,
                  layer_scale_init_values=1e-5,
-                 rope_base=10000.0,
+                 rope_min_period=0.5,
+                 rope_max_period=100.0,
+                 rope_jitter_coord_scale=2.0,
+                 rope_rescale_coord_scale=2.0,
                  use_gradient_checkpoint=False):
         super(VisionEncoder, self).__init__()
         self.use_gradient_checkpoint = use_gradient_checkpoint
@@ -310,11 +383,13 @@ class VisionEncoder(nn.Module):
                                      kernel_size=patch_size,
                                      stride=patch_size)
 
-        self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
-
-        self.rope = RopePositionEmbedding2D(dim=embed_dim,
-                                            num_heads=num_heads,
-                                            base=rope_base)
+        self.rope = RopePositionEmbedding2D(
+            dim=embed_dim,
+            num_heads=num_heads,
+            min_period=rope_min_period,
+            max_period=rope_max_period,
+            jitter_coord_scale=rope_jitter_coord_scale,
+            rescale_coord_scale=rope_rescale_coord_scale)
 
         self.blocks = nn.ModuleList([
             TransformerBlock(dim=embed_dim,
@@ -328,6 +403,9 @@ class VisionEncoder(nn.Module):
         ])
 
         self.norm = RMSNorm(embed_dim)
+        self.attn_pool = AttentionPool(dim=embed_dim,
+                                       num_heads=num_heads,
+                                       num_kv_heads=num_kv_heads)
         self.proj = nn.Linear(embed_dim, output_dim, bias=False)
 
         for m in self.modules():
@@ -339,17 +417,14 @@ class VisionEncoder(nn.Module):
                 nn.init.trunc_normal_(m.weight, std=0.02)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-        nn.init.trunc_normal_(self.cls_token, std=0.02)
+        nn.init.trunc_normal_(self.attn_pool.query, std=0.02)
 
     def forward(self, x):
         patches = self.patch_embed(x)
         B, C, H, W = patches.shape
         x = patches.flatten(2).transpose(1, 2)
 
-        cls_tokens = self.cls_token.expand(B, -1, -1)
-        x = torch.cat([cls_tokens, x], dim=1)
-
-        rope_sincos = self.rope(H, W)
+        rope_sincos = self.rope(H, W, B)
 
         for _, block in enumerate(self.blocks):
             if self.use_gradient_checkpoint:
@@ -357,11 +432,12 @@ class VisionEncoder(nn.Module):
                                x,
                                rope_sincos,
                                None,
+                               False,
                                use_reentrant=False)
             else:
                 x = block(x, rope_sincos)
 
-        x = self.norm(x[:, 0])
+        x = self.attn_pool(self.norm(x))
         x = self.proj(x)
 
         return x
@@ -371,7 +447,7 @@ class TextEncoder(nn.Module):
 
     def __init__(self,
                  vocab_size=49408,
-                 context_length=77,
+                 context_length=96,
                  embed_dim=512,
                  depth=12,
                  num_heads=8,
@@ -380,15 +456,16 @@ class TextEncoder(nn.Module):
                  output_dim=512,
                  dropout=0.0,
                  layer_scale_init_values=1e-5,
-                 pool_type='argmax',
                  pad_id=0,
                  no_causal_mask=False,
+                 use_key_padding_mask=True,
                  use_gradient_checkpoint=False):
         super(TextEncoder, self).__init__()
         self.vocab_size = vocab_size
         self.context_length = context_length
-        self.pool_type = pool_type
         self.pad_id = pad_id
+        self.no_causal_mask = no_causal_mask
+        self.use_key_padding_mask = use_key_padding_mask
         self.use_gradient_checkpoint = use_gradient_checkpoint
 
         self.token_embed = nn.Embedding(vocab_size, embed_dim)
@@ -411,13 +488,6 @@ class TextEncoder(nn.Module):
         self.norm = RMSNorm(embed_dim)
         self.proj = nn.Linear(embed_dim, output_dim, bias=False)
 
-        if no_causal_mask:
-            self.attn_mask = None
-        else:
-            self.register_buffer('attn_mask',
-                                 self.build_causal_mask(),
-                                 persistent=False)
-
         for m in self.modules():
             if isinstance(m, nn.Linear):
                 nn.init.trunc_normal_(m.weight, std=0.02)
@@ -425,27 +495,25 @@ class TextEncoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
         nn.init.normal_(self.token_embed.weight, std=0.02)
 
-    def build_causal_mask(self):
-        mask = torch.empty(self.context_length, self.context_length)
-        mask.fill_(float("-inf"))
-        mask.triu_(1)
+    def build_key_padding_mask(self, text):
+        keep = (text != self.pad_id)
+        keep = keep.clone()
+        keep[:, 0] = True
 
-        return mask
+        return keep[:, None, None, :]
 
-    def text_global_pool(self, x, text=None, pool_type='argmax'):
-        if pool_type == 'first':
-            pooled, tokens = x[:, 0], x[:, 1:]
-        elif pool_type == 'last':
-            assert text is not None
-            # 找到每个样本最后一个非 PAD token 的位置
-            eos_indices = (text != self.pad_id).sum(dim=-1) - 1
-            pooled, tokens = x[torch.arange(x.shape[0]), eos_indices], x
-        elif pool_type == 'argmax':
-            assert text is not None
-            pooled, tokens = x[torch.arange(x.shape[0]),
-                               text.argmax(dim=-1)], x
-        else:
-            pooled = tokens = x
+    def build_attn_mask(self, text):
+        if self.no_causal_mask:
+            if self.use_key_padding_mask:
+                return self.build_key_padding_mask(text), False
+
+            return None, False
+
+        return None, True
+
+    def text_global_pool(self, x, text):
+        eos_indices = ((text != self.pad_id).sum(dim=-1) - 1).clamp(min=0)
+        pooled, tokens = x[torch.arange(x.shape[0]), eos_indices], x
 
         return pooled, tokens
 
@@ -456,9 +524,7 @@ class TextEncoder(nn.Module):
 
         rope_sincos = self.rope(L)
 
-        attn_mask = self.attn_mask
-        if attn_mask is not None and L < self.context_length:
-            attn_mask = attn_mask[:L, :L]
+        attn_mask, is_causal = self.build_attn_mask(text)
 
         for _, block in enumerate(self.blocks):
             if self.use_gradient_checkpoint:
@@ -466,13 +532,14 @@ class TextEncoder(nn.Module):
                                x,
                                rope_sincos,
                                attn_mask,
+                               is_causal,
                                use_reentrant=False)
             else:
-                x = block(x, rope_sincos, attn_mask)
+                x = block(x, rope_sincos, attn_mask, is_causal)
 
         x = self.norm(x)
 
-        x, _ = self.text_global_pool(x, text, pool_type=self.pool_type)
+        x, _ = self.text_global_pool(x, text)
         x = self.proj(x)
 
         return x
@@ -481,7 +548,7 @@ class TextEncoder(nn.Module):
 class GQACLIP(nn.Module):
 
     def __init__(self,
-                 image_size=224,
+                 image_size=256,
                  patch_size=16,
                  vision_embed_dim=768,
                  vision_depth=12,
@@ -489,20 +556,23 @@ class GQACLIP(nn.Module):
                  vision_num_kv_heads=4,
                  vision_mlp_ratio=4.0,
                  vision_layer_scale_init_values=1e-5,
-                 vocab_size=49408,
-                 context_length=77,
+                 vocab_size=248070,
+                 context_length=96,
                  text_embed_dim=512,
                  text_depth=12,
                  text_num_heads=8,
                  text_num_kv_heads=4,
                  text_mlp_ratio=4.0,
                  text_layer_scale_init_values=1e-5,
-                 text_pad_id=0,
+                 text_pad_id=248055,
                  text_no_causal_mask=False,
-                 text_pool_type='argmax',
+                 text_use_key_padding_mask=True,
                  output_dim=512,
                  dropout=0.0,
-                 rope_base=10000.0,
+                 vision_rope_min_period=0.5,
+                 vision_rope_max_period=100.0,
+                 vision_rope_jitter_coord_scale=2.0,
+                 vision_rope_rescale_coord_scale=2.0,
                  init_logit_scale=np.log(1 / 0.07),
                  init_logit_bias=None,
                  use_gradient_checkpoint=False):
@@ -519,7 +589,10 @@ class GQACLIP(nn.Module):
             output_dim=output_dim,
             dropout=dropout,
             layer_scale_init_values=vision_layer_scale_init_values,
-            rope_base=rope_base,
+            rope_min_period=vision_rope_min_period,
+            rope_max_period=vision_rope_max_period,
+            rope_jitter_coord_scale=vision_rope_jitter_coord_scale,
+            rope_rescale_coord_scale=vision_rope_rescale_coord_scale,
             use_gradient_checkpoint=use_gradient_checkpoint)
 
         self.text = TextEncoder(
@@ -533,9 +606,9 @@ class GQACLIP(nn.Module):
             output_dim=output_dim,
             dropout=dropout,
             layer_scale_init_values=text_layer_scale_init_values,
-            pool_type=text_pool_type,
             pad_id=text_pad_id,
             no_causal_mask=text_no_causal_mask,
+            use_key_padding_mask=text_use_key_padding_mask,
             use_gradient_checkpoint=use_gradient_checkpoint)
 
         self.logit_scale = nn.Parameter(
@@ -553,19 +626,16 @@ class GQACLIP(nn.Module):
     def encode_image(self, image):
         image_features = self.visual(image)
 
-        return image_features
+        return F.normalize(image_features, dim=-1)
 
     def encode_text(self, text):
         text_features = self.text(text)
 
-        return text_features
+        return F.normalize(text_features, dim=-1)
 
     def forward(self, images, tokens):
         image_features = self.encode_image(images)
         text_features = self.encode_text(tokens)
-
-        image_features = F.normalize(image_features, dim=-1)
-        text_features = F.normalize(text_features, dim=-1)
 
         outputs = {
             'image_features': image_features,
@@ -585,104 +655,200 @@ class GQACLIP(nn.Module):
 ####################################################################################
 
 
-def vit_base_patch16_gqa_clip(image_size=224,
+def vit_base_patch16_gqa_clip(image_size=256,
                               patch_size=16,
-                              context_length=77,
-                              vocab_size=248058,
+                              vision_embed_dim=768,
+                              vision_depth=12,
+                              vision_num_heads=12,
+                              vision_num_kv_heads=6,
+                              vision_mlp_ratio=4.5,
+                              vision_layer_scale_init_values=1e-5,
+                              vocab_size=248070,
+                              context_length=96,
+                              text_embed_dim=512,
+                              text_depth=12,
+                              text_num_heads=8,
+                              text_num_kv_heads=4,
+                              text_mlp_ratio=4.5,
+                              text_layer_scale_init_values=1e-5,
+                              text_pad_id=248055,
+                              text_no_causal_mask=False,
+                              text_use_key_padding_mask=True,
+                              output_dim=512,
+                              init_logit_scale=np.log(1 / 0.07),
+                              init_logit_bias=None,
                               **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=768,
-                   vision_depth=12,
-                   vision_num_heads=12,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=512,
-                   text_depth=12,
-                   text_num_heads=8,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   output_dim=512,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_large_patch16_gqa_clip(image_size=224,
+def vit_large_patch16_gqa_clip(image_size=256,
                                patch_size=16,
-                               context_length=77,
-                               vocab_size=248058,
+                               vision_embed_dim=1024,
+                               vision_depth=24,
+                               vision_num_heads=16,
+                               vision_num_kv_heads=8,
+                               vision_mlp_ratio=4.5,
+                               vision_layer_scale_init_values=1e-5,
+                               vocab_size=248070,
+                               context_length=96,
+                               text_embed_dim=768,
+                               text_depth=12,
+                               text_num_heads=12,
+                               text_num_kv_heads=6,
+                               text_mlp_ratio=4.5,
+                               text_layer_scale_init_values=1e-5,
+                               text_pad_id=248055,
+                               text_no_causal_mask=False,
+                               text_use_key_padding_mask=True,
+                               output_dim=768,
+                               init_logit_scale=np.log(1 / 0.07),
+                               init_logit_bias=None,
                                **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1024,
-                   vision_depth=24,
-                   vision_num_heads=16,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=768,
-                   text_depth=12,
-                   text_num_heads=12,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   output_dim=768,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_huge_patch16_gqa_clip(image_size=224,
+def vit_huge_patch16_gqa_clip(image_size=256,
                               patch_size=16,
-                              context_length=77,
-                              vocab_size=248058,
+                              vision_embed_dim=1280,
+                              vision_depth=32,
+                              vision_num_heads=20,
+                              vision_num_kv_heads=10,
+                              vision_mlp_ratio=4.5,
+                              vision_layer_scale_init_values=1e-5,
+                              vocab_size=248070,
+                              context_length=96,
+                              text_embed_dim=1024,
+                              text_depth=24,
+                              text_num_heads=16,
+                              text_num_kv_heads=8,
+                              text_mlp_ratio=4.5,
+                              text_layer_scale_init_values=1e-5,
+                              text_pad_id=248055,
+                              text_no_causal_mask=False,
+                              text_use_key_padding_mask=True,
+                              output_dim=1024,
+                              init_logit_scale=np.log(1 / 0.07),
+                              init_logit_bias=None,
                               **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1280,
-                   vision_depth=32,
-                   vision_num_heads=16,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=1024,
-                   text_depth=16,
-                   text_num_heads=16,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   output_dim=1024,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_1B_patch16_gqa_clip(image_size=224,
+def vit_1B_patch16_gqa_clip(image_size=256,
                             patch_size=16,
-                            context_length=77,
-                            vocab_size=248058,
+                            vision_embed_dim=1536,
+                            vision_depth=36,
+                            vision_num_heads=24,
+                            vision_num_kv_heads=12,
+                            vision_mlp_ratio=4.5,
+                            vision_layer_scale_init_values=1e-5,
+                            vocab_size=248070,
+                            context_length=96,
+                            text_embed_dim=1024,
+                            text_depth=24,
+                            text_num_heads=16,
+                            text_num_kv_heads=8,
+                            text_mlp_ratio=4.5,
+                            text_layer_scale_init_values=1e-5,
+                            text_pad_id=248055,
+                            text_no_causal_mask=False,
+                            text_use_key_padding_mask=True,
+                            output_dim=1024,
+                            init_logit_scale=np.log(1 / 0.07),
+                            init_logit_bias=None,
                             **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1536,
-                   vision_depth=36,
-                   vision_num_heads=24,
-                   vision_num_kv_heads=6,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=1280,
-                   text_depth=20,
-                   text_num_heads=16,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   output_dim=1280,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
 ####################################################################################
@@ -690,120 +856,200 @@ def vit_1B_patch16_gqa_clip(image_size=224,
 ####################################################################################
 
 
-def vit_base_patch16_gqa_siglip(image_size=224,
+def vit_base_patch16_gqa_siglip(image_size=256,
                                 patch_size=16,
-                                context_length=64,
-                                vocab_size=248058,
+                                vision_embed_dim=768,
+                                vision_depth=12,
+                                vision_num_heads=12,
+                                vision_num_kv_heads=6,
+                                vision_mlp_ratio=4.5,
+                                vision_layer_scale_init_values=1e-5,
+                                vocab_size=248070,
+                                context_length=96,
+                                text_embed_dim=512,
+                                text_depth=12,
+                                text_num_heads=8,
+                                text_num_kv_heads=4,
+                                text_mlp_ratio=4.5,
+                                text_layer_scale_init_values=1e-5,
+                                text_pad_id=248055,
+                                text_no_causal_mask=False,
+                                text_use_key_padding_mask=False,
+                                output_dim=512,
+                                init_logit_scale=np.log(10),
+                                init_logit_bias=-10,
                                 **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=768,
-                   vision_depth=12,
-                   vision_num_heads=12,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=512,
-                   text_depth=12,
-                   text_num_heads=8,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   text_no_causal_mask=True,
-                   text_pool_type='last',
-                   output_dim=512,
-                   init_logit_scale=np.log(10),
-                   init_logit_bias=-10,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_large_patch16_gqa_siglip(image_size=224,
+def vit_large_patch16_gqa_siglip(image_size=256,
                                  patch_size=16,
-                                 context_length=64,
-                                 vocab_size=248058,
+                                 vision_embed_dim=1024,
+                                 vision_depth=24,
+                                 vision_num_heads=16,
+                                 vision_num_kv_heads=8,
+                                 vision_mlp_ratio=4.5,
+                                 vision_layer_scale_init_values=1e-5,
+                                 vocab_size=248070,
+                                 context_length=96,
+                                 text_embed_dim=768,
+                                 text_depth=12,
+                                 text_num_heads=12,
+                                 text_num_kv_heads=6,
+                                 text_mlp_ratio=4.5,
+                                 text_layer_scale_init_values=1e-5,
+                                 text_pad_id=248055,
+                                 text_no_causal_mask=False,
+                                 text_use_key_padding_mask=False,
+                                 output_dim=768,
+                                 init_logit_scale=np.log(10),
+                                 init_logit_bias=-10,
                                  **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1024,
-                   vision_depth=24,
-                   vision_num_heads=16,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=768,
-                   text_depth=12,
-                   text_num_heads=12,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   text_no_causal_mask=True,
-                   text_pool_type='last',
-                   output_dim=768,
-                   init_logit_scale=np.log(10),
-                   init_logit_bias=-10,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_huge_patch16_gqa_siglip(image_size=224,
+def vit_huge_patch16_gqa_siglip(image_size=256,
                                 patch_size=16,
-                                context_length=64,
-                                vocab_size=248058,
+                                vision_embed_dim=1280,
+                                vision_depth=32,
+                                vision_num_heads=20,
+                                vision_num_kv_heads=10,
+                                vision_mlp_ratio=4.5,
+                                vision_layer_scale_init_values=1e-5,
+                                vocab_size=248070,
+                                context_length=96,
+                                text_embed_dim=1024,
+                                text_depth=24,
+                                text_num_heads=16,
+                                text_num_kv_heads=8,
+                                text_mlp_ratio=4.5,
+                                text_layer_scale_init_values=1e-5,
+                                text_pad_id=248055,
+                                text_no_causal_mask=False,
+                                text_use_key_padding_mask=False,
+                                output_dim=1024,
+                                init_logit_scale=np.log(10),
+                                init_logit_bias=-10,
                                 **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1280,
-                   vision_depth=32,
-                   vision_num_heads=16,
-                   vision_num_kv_heads=4,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=1024,
-                   text_depth=16,
-                   text_num_heads=16,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   text_no_causal_mask=True,
-                   text_pool_type='last',
-                   output_dim=1024,
-                   init_logit_scale=np.log(10),
-                   init_logit_bias=-10,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
-def vit_1B_patch16_gqa_siglip(image_size=224,
+def vit_1B_patch16_gqa_siglip(image_size=256,
                               patch_size=16,
-                              context_length=64,
-                              vocab_size=248058,
+                              vision_embed_dim=1536,
+                              vision_depth=36,
+                              vision_num_heads=24,
+                              vision_num_kv_heads=12,
+                              vision_mlp_ratio=4.5,
+                              vision_layer_scale_init_values=1e-5,
+                              vocab_size=248070,
+                              context_length=96,
+                              text_embed_dim=1024,
+                              text_depth=24,
+                              text_num_heads=16,
+                              text_num_kv_heads=8,
+                              text_mlp_ratio=4.5,
+                              text_layer_scale_init_values=1e-5,
+                              text_pad_id=248055,
+                              text_no_causal_mask=False,
+                              text_use_key_padding_mask=False,
+                              output_dim=1024,
+                              init_logit_scale=np.log(10),
+                              init_logit_bias=-10,
                               **kwargs):
-    return GQACLIP(image_size=image_size,
-                   patch_size=patch_size,
-                   vision_embed_dim=1536,
-                   vision_depth=36,
-                   vision_num_heads=24,
-                   vision_num_kv_heads=6,
-                   vision_mlp_ratio=4.0,
-                   vision_layer_scale_init_values=1e-5,
-                   vocab_size=vocab_size,
-                   context_length=context_length,
-                   text_embed_dim=1280,
-                   text_depth=20,
-                   text_num_heads=16,
-                   text_num_kv_heads=4,
-                   text_mlp_ratio=4.0,
-                   text_layer_scale_init_values=1e-5,
-                   text_no_causal_mask=True,
-                   text_pool_type='last',
-                   output_dim=1280,
-                   init_logit_scale=np.log(10),
-                   init_logit_bias=-10,
-                   **kwargs)
+    return GQACLIP(
+        image_size=image_size,
+        patch_size=patch_size,
+        vision_embed_dim=vision_embed_dim,
+        vision_depth=vision_depth,
+        vision_num_heads=vision_num_heads,
+        vision_num_kv_heads=vision_num_kv_heads,
+        vision_mlp_ratio=vision_mlp_ratio,
+        vision_layer_scale_init_values=vision_layer_scale_init_values,
+        vocab_size=vocab_size,
+        context_length=context_length,
+        text_embed_dim=text_embed_dim,
+        text_depth=text_depth,
+        text_num_heads=text_num_heads,
+        text_num_kv_heads=text_num_kv_heads,
+        text_mlp_ratio=text_mlp_ratio,
+        text_layer_scale_init_values=text_layer_scale_init_values,
+        text_pad_id=text_pad_id,
+        text_no_causal_mask=text_no_causal_mask,
+        text_use_key_padding_mask=text_use_key_padding_mask,
+        output_dim=output_dim,
+        init_logit_scale=init_logit_scale,
+        init_logit_bias=init_logit_bias,
+        **kwargs)
 
 
 if __name__ == '__main__':
@@ -825,10 +1071,11 @@ if __name__ == '__main__':
     import os
     import sys
 
-    BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    BASE_DIR = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     sys.path.append(BASE_DIR)
 
-    from tokenizer import Qwen35Tokenizer
+    from SimpleClip.models.tokenizer import Qwen35Tokenizer
 
     net = vit_base_patch16_gqa_clip()
     net = net.cuda()

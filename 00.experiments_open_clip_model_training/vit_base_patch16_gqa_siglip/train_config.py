@@ -48,7 +48,7 @@ class config:
         random_select_caption=True,
         transform=transforms.Compose([
             Opencv2PIL(),
-            TorchRandomResizedCrop(resize=224,
+            TorchRandomResizedCrop(resize=256,
                                    scale=(0.9, 1.0),
                                    interpolation=InterpolationMode.BICUBIC),
             TorchMeanStdNormalize(mean=[0.48145466, 0.4578275, 0.40821073],
@@ -58,7 +58,7 @@ class config:
 
     seed = 0
     # batch_size is total size
-    batch_size = 512
+    batch_size = 1024
     # num_workers is total workers
     num_workers = 8
     accumulation_steps = 1
@@ -68,6 +68,7 @@ class config:
         {
             'lr': 5e-4,
             'weight_decay': 0.2,
+            'global_weight_decay': False,
             'exclude_muon_layer_name_list': [],
         },
     )
@@ -75,7 +76,7 @@ class config:
     scheduler = (
         'CosineLR',
         {
-            'warm_up_epochs': 0,
+            'warm_up_epochs': 0.1,
             'min_lr': 5e-6,
         },
     )
@@ -103,3 +104,5 @@ class config:
     use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000
+
+    clip_max_norm = 1.0

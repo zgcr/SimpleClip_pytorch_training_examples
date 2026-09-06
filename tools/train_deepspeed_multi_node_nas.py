@@ -196,27 +196,11 @@ def build_deepspeed_config(config):
     # Mixed precision
     if config.use_amp:
         if config.amp_type == torch.float16:
-            ds_config["fp16"] = {
-                "enabled": True,
-                # 0代表启用dynamic loss scaling
-                "loss_scale": 0,
-                # dynamic loss scaling的初始值为65536,2的16次方
-                "initial_scale_power": 16,
-                # 连续1000个step没有出现overflow的情况下loss scale会翻倍(尝试更激进的缩放以获得更好的梯度精度),1000是DeepSpeed默认值
-                "loss_scale_window": 1000,
-                # 连续发生2次overflow之后才真正将loss scale减半
-                "hysteresis": 2,
-                # loss scale下限为1
-                "min_loss_scale": 1,
-            }
             ds_config["torch_autocast"] = {
                 "enabled": True,
                 "dtype": "float16",
             }
         elif config.amp_type == torch.bfloat16:
-            ds_config["bf16"] = {
-                "enabled": True,
-            }
             ds_config["torch_autocast"] = {
                 "enabled": True,
                 "dtype": "bfloat16",
@@ -531,6 +515,11 @@ def main():
 
     model = config.model.cuda()
     train_criterion = config.train_criterion.cuda()
+
+    assert config.use_siglip_loss == (model.logit_bias is not None), \
+        'use_siglip_loss must match whether the model defines logit_bias!'
+    assert model.vocab_size >= config.tokenizer.vocab_size, \
+        'model vocab_size must cover the tokenizer vocab (including added tokens)!'
 
     # parameters needs to be updated by the optimizer
     # buffers doesn't needs to be updated by the optimizer

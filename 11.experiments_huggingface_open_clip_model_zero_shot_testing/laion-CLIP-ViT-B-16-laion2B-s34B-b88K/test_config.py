@@ -44,7 +44,7 @@ class config:
 
     seed = 0
     # batch_size is total size
-    batch_size = 512
+    batch_size = 1024
     # num_workers is total workers
     num_workers = 8
 

@@ -1,16 +1,11 @@
-aiohttp
-fsspec
 ftfy
 pillow
 numpy
-nltk
-opencv-python
-regex
+opencv-python==4.13.0.90
 tqdm
 yapf
 gpustat
 safetensors
-sentencepiece
 calflops
 open_clip_torch==3.3.0
 timm==1.0.28

@@ -106,6 +106,11 @@ def main():
     model = config.model.cuda()
     train_criterion = config.train_criterion.cuda()
 
+    assert config.use_siglip_loss == (model.logit_bias is not None), \
+        'use_siglip_loss must match whether the model defines logit_bias!'
+    assert model.vocab_size >= config.tokenizer.vocab_size, \
+        'model vocab_size must cover the tokenizer vocab (including added tokens)!'
+
     # parameters needs to be updated by the optimizer
     # buffers doesn't needs to be updated by the optimizer
     log_info = f'--------------------parameters--------------------'

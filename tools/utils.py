@@ -500,7 +500,7 @@ def build_optimizer(config, model):
         param_layer_weight_dict[name] = param
 
         if global_weight_decay is False:
-            if param.ndim == 1 or any(no_weight_decay_layer_name in name
+            if param.ndim <= 1 or any(no_weight_decay_layer_name in name
                                       for no_weight_decay_layer_name in
                                       no_weight_decay_layer_name_list):
                 param_layer_decay_dict[name] = 0.
@@ -581,10 +581,8 @@ def build_optimizer(config, model):
             nesterov=nesterov), model_layer_weight_decay_list
 
     elif optimizer_name == 'MuonSGD':
-        # Note: MuonSGD uses unified lr and wd for all parameters.
-        # Per-layer lr/wd settings from optimizer_parameters are not applied.
-        # MuonSGD optimizer don't support global_weight_decay
-        # MuonSGD optimizer don't support no_weight_decay_layer_name_list
+        # Note: MuonSGD uses unified lr for all parameters.
+        # Per-layer lr settings from optimizer_parameters are not applied.
         # MuonSGD optimizer don't support sub_layer_lr/sub_layer_weight_decay
 
         exclude_muon_layer_name_list = [
@@ -601,9 +599,10 @@ def build_optimizer(config, model):
             exclude_muon_layer_name_list = exclude_muon_layer_name_list + optimizer_parameters[
                 'exclude_muon_layer_name_list']
 
-        # Separate parameters into muon_params and sgd_params
+        # Separate parameters into muon_params, sgd_params and sgd_nowd_params
         muon_param_list, muon_param_names = [], []
         sgd_param_list, sgd_param_names = [], []
+        sgd_nowd_param_list, sgd_nowd_param_names = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -619,6 +618,12 @@ def build_optimizer(config, model):
             if use_muon:
                 muon_param_list.append(param)
                 muon_param_names.append(name)
+            elif global_weight_decay is False and (param.ndim <= 1 or any(
+                    no_weight_decay_layer_name in name
+                    for no_weight_decay_layer_name in
+                    no_weight_decay_layer_name_list)):
+                sgd_nowd_param_list.append(param)
+                sgd_nowd_param_names.append(name)
             else:
                 sgd_param_list.append(param)
                 sgd_param_names.append(name)
@@ -639,6 +644,13 @@ def build_optimizer(config, model):
                 'lr': lr,
                 'weight_decay': weight_decay,
             })
+        if len(sgd_nowd_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': sgd_nowd_param_names,
+                'optimizer': 'MuonSGD(SGD)',
+                'lr': lr,
+                'weight_decay': 0.,
+            })
 
         momentum = 0.95 if 'momentum' not in optimizer_parameters.keys(
         ) else optimizer_parameters['momentum']
@@ -657,6 +669,7 @@ def build_optimizer(config, model):
             wd=weight_decay,
             muon_params=muon_param_list,
             sgd_params=sgd_param_list,
+            sgd_nowd_params=sgd_nowd_param_list,
             momentum=momentum,
             nesterov=nesterov,
             ns_steps=ns_steps,
@@ -676,10 +689,8 @@ def build_optimizer(config, model):
                                  eps=eps), model_layer_weight_decay_list
 
     elif optimizer_name == 'MuonAdamW':
-        # Note: MuonAdamW uses unified lr and wd for all parameters.
-        # Per-layer lr/wd settings from optimizer_parameters are not applied.
-        # MuonAdamW optimizer don't support global_weight_decay
-        # MuonAdamW optimizer don't support no_weight_decay_layer_name_list
+        # Note: MuonAdamW uses unified lr for all parameters.
+        # Per-layer lr settings from optimizer_parameters are not applied.
         # MuonAdamW optimizer don't support sub_layer_lr/sub_layer_weight_decay
 
         exclude_muon_layer_name_list = [
@@ -696,9 +707,10 @@ def build_optimizer(config, model):
             exclude_muon_layer_name_list = exclude_muon_layer_name_list + optimizer_parameters[
                 'exclude_muon_layer_name_list']
 
-        # Separate parameters into muon_params and adamw_params
+        # Separate parameters into muon_params, adamw_params and adamw_nowd_params
         muon_param_list, muon_param_names = [], []
         adamw_param_list, adamw_param_names = [], []
+        adamw_nowd_param_list, adamw_nowd_param_names = [], []
         for name, param in model.named_parameters():
             if not param.requires_grad:
                 continue
@@ -714,6 +726,12 @@ def build_optimizer(config, model):
             if use_muon:
                 muon_param_list.append(param)
                 muon_param_names.append(name)
+            elif global_weight_decay is False and (param.ndim <= 1 or any(
+                    no_weight_decay_layer_name in name
+                    for no_weight_decay_layer_name in
+                    no_weight_decay_layer_name_list)):
+                adamw_nowd_param_list.append(param)
+                adamw_nowd_param_names.append(name)
             else:
                 adamw_param_list.append(param)
                 adamw_param_names.append(name)
@@ -734,6 +752,13 @@ def build_optimizer(config, model):
                 'lr': lr,
                 'weight_decay': weight_decay,
             })
+        if len(adamw_nowd_param_names) > 0:
+            model_layer_weight_decay_list.append({
+                'name': adamw_nowd_param_names,
+                'optimizer': 'MuonAdamW(AdamW)',
+                'lr': lr,
+                'weight_decay': 0.,
+            })
 
         momentum = 0.95 if 'momentum' not in optimizer_parameters.keys(
         ) else optimizer_parameters['momentum']
@@ -753,6 +778,7 @@ def build_optimizer(config, model):
                          wd=weight_decay,
                          muon_params=muon_param_list,
                          adamw_params=adamw_param_list,
+                         adamw_nowd_params=adamw_nowd_param_list,
                          momentum=momentum,
                          nesterov=nesterov,
                          ns_steps=ns_steps,

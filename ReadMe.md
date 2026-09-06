@@ -38,7 +38,7 @@ conda create -n SimpleClip python=3.12
 
 **4、Install PyTorch:**
 ```
-conda install pytorch==2.5.1 torchvision==0.20.1 torchaudio==2.5.1 pytorch-cuda=12.4 -c pytorch -c nvidia
+pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 ```
 To install a different PyTorch version, find command from here:
 
