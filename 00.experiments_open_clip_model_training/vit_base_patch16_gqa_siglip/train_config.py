@@ -104,5 +104,3 @@ class config:
     use_ema_model = True
     ema_model_decay = 0.9999
     ema_model_tau = 2000
-
-    clip_max_norm = 1.0
